@@ -2,5 +2,4 @@ streamlit
 pandas
 matplotlib
 plotly
-mplfinance
 numpy
