@@ -313,107 +313,120 @@ def create_gex_by_expiration_plot(data: pd.DataFrame, max_days: int):
     
     return fig
 
-def create_3d_surface_plot(spot: float, data: pd.DataFrame, strike_range: float, max_days: int):
-    """Crear gráfico 3D de superficie GEX"""
-    max_date = datetime.now() + timedelta(days=max_days)
-    strike_min = spot * (1 - strike_range/100)
-    strike_max = spot * (1 + strike_range/100)
+def create_strike_distribution_plot(spot: float, data: pd.DataFrame):
+    """Crear gráfico de distribución de GEX por tipo de opción"""
+    # Separar calls y puts
+    calls_data = data[data['type'] == 'C'].groupby('strike')['GEX'].sum() / 1e9
+    puts_data = data[data['type'] == 'P'].groupby('strike')['GEX'].sum() / 1e9
     
-    mask = (
-        (data["expiration"] <= max_date) &
-        (data["strike"] >= strike_min) &
-        (data["strike"] <= strike_max)
+    fig = go.Figure()
+    
+    # Añadir calls
+    fig.add_trace(go.Bar(
+        x=calls_data.index,
+        y=calls_data.values,
+        name='Calls',
+        marker_color='#00D9FF',
+        opacity=0.7,
+        hovertemplate='Strike: $%{x:.2f}<br>Call GEX: %{y:.3f}B<br><extra></extra>'
+    ))
+    
+    # Añadir puts
+    fig.add_trace(go.Bar(
+        x=puts_data.index,
+        y=puts_data.values,
+        name='Puts',
+        marker_color='#FE53BB',
+        opacity=0.7,
+        hovertemplate='Strike: $%{x:.2f}<br>Put GEX: %{y:.3f}B<br><extra></extra>'
+    ))
+    
+    # Línea de precio spot
+    fig.add_vline(
+        x=spot, 
+        line_dash="dash", 
+        line_color="#FFD700", 
+        line_width=2,
+        annotation_text=f"Spot: ${spot:.2f}",
+        annotation_position="top"
     )
-    data_filtered = data[mask]
-    
-    # Crear grid para superficie
-    gex_pivot = data_filtered.pivot_table(
-        values='GEX',
-        index='strike',
-        columns='expiration',
-        aggfunc='sum'
-    ) / 1e6
-    
-    # Rellenar NaN con 0
-    gex_pivot = gex_pivot.fillna(0)
-    
-    fig = go.Figure(data=[go.Surface(
-        x=gex_pivot.columns,
-        y=gex_pivot.index,
-        z=gex_pivot.values,
-        colorscale='RdBu',
-        reversescale=True,
-        hovertemplate='Strike: $%{y:.2f}<br>Fecha: %{x|%b %d}<br>GEX: %{z:.1f}M<br><extra></extra>'
-    )])
     
     fig.update_layout(
         title={
-            'text': '🌐 Superficie de Exposición Gamma',
+            'text': '🎯 Distribución GEX - Calls vs Puts',
             'x': 0.5,
             'xanchor': 'center',
             'font': {'size': 24, 'color': 'white'}
         },
-        scene=dict(
-            xaxis=dict(title='Fecha de Vencimiento', gridcolor='rgba(255,255,255,0.1)'),
-            yaxis=dict(title='Precio Strike ($)', gridcolor='rgba(255,255,255,0.1)'),
-            zaxis=dict(title='GEX ($M / 1% mov)', gridcolor='rgba(255,255,255,0.1)'),
-            bgcolor='rgba(0,0,0,0)',
-            camera=dict(eye=dict(x=1.5, y=1.5, z=1.5))
-        ),
+        xaxis_title="Precio Strike ($)",
+        yaxis_title="Exposición Gamma ($Bn / 1% movimiento)",
+        hovermode='x unified',
         plot_bgcolor='rgba(0,0,0,0)',
         paper_bgcolor='rgba(0,0,0,0)',
         font=dict(color='white'),
-        height=600
+        xaxis=dict(gridcolor='rgba(255,255,255,0.1)'),
+        yaxis=dict(gridcolor='rgba(255,255,255,0.1)', zeroline=True, zerolinecolor='rgba(255,255,255,0.2)'),
+        legend=dict(x=0.02, y=0.98, bgcolor='rgba(0,0,0,0.5)'),
+        barmode='overlay',
+        height=500
     )
     
     return fig
 
-def create_heatmap_plot(data: pd.DataFrame, metric: str = 'GEX'):
-    """Crear mapa de calor de GEX o volumen"""
-    # Preparar datos para heatmap
-    if metric == 'GEX':
-        pivot_data = data.pivot_table(
-            values='GEX',
-            index='strike',
-            columns='expiration',
-            aggfunc='sum'
-        ) / 1e6
-        title = '🔥 Mapa de Calor - Exposición Gamma'
-        colorscale = 'RdBu'
-    else:
-        pivot_data = data.pivot_table(
-            values='volume',
-            index='strike',
-            columns='expiration',
-            aggfunc='sum'
-        )
-        title = '📊 Mapa de Calor - Volumen'
-        colorscale = 'Viridis'
+def create_cumulative_gex_plot(data: pd.DataFrame):
+    """Crear gráfico de GEX acumulativo por días hasta vencimiento"""
+    # Agrupar por días hasta vencimiento
+    data_copy = data.copy()
+    data_copy['days_to_expiry'] = (data_copy['expiration'] - datetime.now()).dt.days
     
-    pivot_data = pivot_data.fillna(0)
+    # Filtrar datos válidos
+    data_copy = data_copy[data_copy['days_to_expiry'] >= 0]
     
-    fig = go.Figure(data=go.Heatmap(
-        z=pivot_data.values,
-        x=pivot_data.columns,
-        y=pivot_data.index,
-        colorscale=colorscale,
-        reversescale=(metric == 'GEX'),
-        hovertemplate='Strike: $%{y:.2f}<br>Fecha: %{x|%b %d}<br>Valor: %{z:.1f}<br><extra></extra>'
+    # Calcular GEX acumulativo
+    gex_by_days = data_copy.groupby('days_to_expiry')['GEX'].sum().sort_index() / 1e9
+    gex_cumulative = gex_by_days.cumsum()
+    
+    fig = go.Figure()
+    
+    # Línea de GEX acumulativo
+    fig.add_trace(go.Scatter(
+        x=gex_cumulative.index,
+        y=gex_cumulative.values,
+        mode='lines',
+        fill='tozeroy',
+        line=dict(color='#00D9FF', width=3),
+        fillcolor='rgba(0, 217, 255, 0.2)',
+        name='GEX Acumulativo',
+        hovertemplate='Días: %{x}<br>GEX Acum: %{y:.3f}B<br><extra></extra>'
     ))
+    
+    # Marcadores para vencimientos importantes
+    major_expirations = [30, 60, 90, 180, 365]
+    for exp in major_expirations:
+        if exp in gex_cumulative.index:
+            fig.add_vline(
+                x=exp,
+                line_dash="dot",
+                line_color="rgba(255,255,255,0.3)",
+                line_width=1,
+                annotation_text=f"{exp}d",
+                annotation_position="top"
+            )
     
     fig.update_layout(
         title={
-            'text': title,
+            'text': '📈 GEX Acumulativo por Tiempo hasta Vencimiento',
             'x': 0.5,
             'xanchor': 'center',
-            'font': {'size': 20, 'color': 'white'}
+            'font': {'size': 24, 'color': 'white'}
         },
-        xaxis_title="Fecha de Vencimiento",
-        yaxis_title="Precio Strike ($)",
+        xaxis_title="Días hasta Vencimiento",
+        yaxis_title="GEX Acumulativo ($Bn)",
+        hovermode='x',
         plot_bgcolor='rgba(0,0,0,0)',
         paper_bgcolor='rgba(0,0,0,0)',
         font=dict(color='white'),
-        xaxis=dict(gridcolor='rgba(255,255,255,0.1)', tickformat='%b %d'),
+        xaxis=dict(gridcolor='rgba(255,255,255,0.1)'),
         yaxis=dict(gridcolor='rgba(255,255,255,0.1)'),
         height=500
     )
@@ -488,10 +501,6 @@ def main():
             help="Cómo asumir el posicionamiento de los dealers"
         )
         
-        st.markdown("### 📊 Opciones de Visualización")
-        show_3d = st.checkbox("Mostrar Gráfico 3D", value=True)
-        show_heatmap = st.checkbox("Mostrar Mapa de Calor", value=True)
-        
         # Botón de análisis
         analyze_button = st.button(
             "🚀 Ejecutar Análisis",
@@ -528,7 +537,7 @@ def main():
                         }
                         
                         # Mostrar resultados
-                        display_results(ticker, spot_price, option_data, strike_range, max_expiration_days, show_3d, show_heatmap)
+                        display_results(ticker, spot_price, option_data, strike_range, max_expiration_days)
                     else:
                         st.error("❌ No hay datos válidos después del filtrado")
                 else:
@@ -541,13 +550,13 @@ def main():
         ticker = st.session_state.ticker_data['ticker']
         spot_price = st.session_state.ticker_data['spot']
         option_data = st.session_state.ticker_data['data']
-        display_results(ticker, spot_price, option_data, strike_range, max_expiration_days, show_3d, show_heatmap)
+        display_results(ticker, spot_price, option_data, strike_range, max_expiration_days)
     
     # Guía educativa
     else:
         show_educational_content()
 
-def display_results(ticker, spot_price, option_data, strike_range, max_expiration_days, show_3d, show_heatmap):
+def display_results(ticker, spot_price, option_data, strike_range, max_expiration_days):
     """Mostrar resultados del análisis"""
     
     # Calcular métricas
@@ -609,7 +618,7 @@ def display_results(ticker, spot_price, option_data, strike_range, max_expiratio
         """)
     
     # Tabs para diferentes visualizaciones
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Por Strike", "📅 Por Vencimiento", "🌐 3D", "🔥 Mapa de Calor", "📋 Datos"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Por Strike", "📅 Por Vencimiento", "🎯 Calls vs Puts", "📈 GEX Acumulativo", "📋 Datos"])
     
     with tab1:
         fig = create_gex_by_strike_plot(spot_price, option_data, strike_range)
@@ -646,23 +655,54 @@ def display_results(ticker, spot_price, option_data, strike_range, max_expiratio
                 st.write(f"{days_to_exp} días")
     
     with tab3:
-        if show_3d:
-            fig = create_3d_surface_plot(spot_price, option_data, strike_range, max_expiration_days)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("🌐 Gráfico 3D desactivado. Actívelo en la configuración lateral.")
+        fig = create_strike_distribution_plot(spot_price, option_data)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Resumen Calls vs Puts
+        st.markdown("#### 🎯 Análisis Calls vs Puts")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.info(f"""
+            **📈 CALLS**
+            - GEX Total: ${call_gex:.3f}B
+            - Strikes Activos: {len(option_data[option_data['type'] == 'C']['strike'].unique())}
+            - OI Total: {option_data[option_data['type'] == 'C']['open_interest'].sum():,.0f}
+            """)
+        with col2:
+            st.info(f"""
+            **📉 PUTS**  
+            - GEX Total: ${put_gex:.3f}B
+            - Strikes Activos: {len(option_data[option_data['type'] == 'P']['strike'].unique())}
+            - OI Total: {option_data[option_data['type'] == 'P']['open_interest'].sum():,.0f}
+            """)
     
     with tab4:
-        if show_heatmap:
-            col1, col2 = st.columns(2)
-            with col1:
-                fig = create_heatmap_plot(option_data, 'GEX')
-                st.plotly_chart(fig, use_container_width=True)
-            with col2:
-                fig = create_heatmap_plot(option_data, 'volume')
-                st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("🔥 Mapa de calor desactivado. Actívelo en la configuración lateral.")
+        fig = create_cumulative_gex_plot(option_data)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Análisis temporal
+        st.markdown("#### ⏰ Análisis Temporal de GEX")
+        
+        # Calcular GEX por periodos
+        data_temp = option_data.copy()
+        data_temp['days_to_expiry'] = (data_temp['expiration'] - datetime.now()).dt.days
+        
+        periods = {
+            "0-7 días": (0, 7),
+            "7-30 días": (7, 30),
+            "30-60 días": (30, 60),
+            "60-90 días": (60, 90),
+            "90+ días": (90, 999)
+        }
+        
+        col1, col2, col3, col4, col5 = st.columns(5)
+        cols = [col1, col2, col3, col4, col5]
+        
+        for i, (period, (min_days, max_days)) in enumerate(periods.items()):
+            mask = (data_temp['days_to_expiry'] >= min_days) & (data_temp['days_to_expiry'] < max_days)
+            period_gex = data_temp[mask]['GEX'].sum() / 1e9
+            with cols[i]:
+                st.metric(period, f"${period_gex:.2f}B")
     
     with tab5:
         st.markdown("#### 📋 Datos de Opciones Procesados")
