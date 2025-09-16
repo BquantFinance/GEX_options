@@ -1,5 +1,5 @@
 """
-GEX Analyzer + Max Pain - Versión Optimizada Completa
+GEX Analyzer + Max Pain - Versión Final Optimizada
 Desarrollado por @Gsnchez - bquantfinance.com
 """
 
@@ -250,7 +250,7 @@ def calculate_all_metrics_batch(data: pd.DataFrame, spot_price: float) -> dict:
     return metrics
 
 def create_max_pain_chart_optimized(pain_by_strike: dict, max_pain: float, spot: float):
-    """OPTIMIZADO: Gráfico de Max Pain con menos puntos para renderizado más rápido"""
+    """Gráfico de Max Pain limpio sin flecha confusa"""
     if not pain_by_strike:
         return go.Figure()
     
@@ -284,18 +284,19 @@ def create_max_pain_chart_optimized(pain_by_strike: dict, max_pain: float, spot:
         hovertemplate='Strike: $%{x:.2f}<br>Dolor: $%{y:.2f}B<br><extra></extra>'
     ))
     
-    # Punto Max Pain
+    # Punto Max Pain con label mejorado
     if max_pain in pain_by_strike:
         fig.add_trace(go.Scatter(
             x=[max_pain],
             y=[pain_by_strike[max_pain] / 1e9],
             mode='markers+text',
-            marker=dict(size=12, color='#00FF00', symbol='diamond'),
+            marker=dict(size=15, color='#00FF00', symbol='diamond', line=dict(width=2, color='white')),
             text=['MAX PAIN'],
             textposition='top center',
-            textfont=dict(size=12, color='#00FF00'),
+            textfont=dict(size=14, color='#00FF00', family='Arial Black'),
             name='Max Pain',
-            showlegend=False
+            showlegend=False,
+            hovertemplate='Max Pain: $%{x:.2f}<br>Mínimo Dolor<br><extra></extra>'
         ))
     
     # Línea de precio spot
@@ -304,32 +305,49 @@ def create_max_pain_chart_optimized(pain_by_strike: dict, max_pain: float, spot:
         line_dash="dash",
         line_color="#FFD700",
         line_width=2,
-        annotation_text=f"Spot: ${spot:.2f}"
+        annotation_text=f"Spot: ${spot:.2f}",
+        annotation_position="top left"
     )
     
-    # Flecha direccional si hay diferencia significativa
-    if abs(spot - max_pain) > 0.5 and pain_values:
-        arrow_color = "#00FF00" if max_pain > spot else "#FF0000"
-        fig.add_annotation(
-            x=max_pain,
-            y=max(pain_values) * 0.5,
-            ax=spot,
-            ay=max(pain_values) * 0.5,
-            arrowhead=2,
-            arrowsize=1.5,
-            arrowwidth=3,
-            arrowcolor=arrow_color,
-            opacity=0.7
-        )
+    # Línea vertical en Max Pain para mayor claridad
+    fig.add_vline(
+        x=max_pain,
+        line_dash="dot",
+        line_color="#00FF00",
+        line_width=1,
+        opacity=0.5,
+        annotation_text=f"Target: ${max_pain:.2f}",
+        annotation_position="bottom"
+    )
+    
+    # Título mejorado con información clave
+    distance_pct = ((max_pain - spot) / spot * 100)
+    direction = "📈" if max_pain > spot else "📉"
     
     fig.update_layout(
-        title=f'🎯 MAX PAIN: ${max_pain:.2f} | Distancia: {((max_pain-spot)/spot*100):.2f}%',
+        title={
+            'text': f'🎯 MAX PAIN: ${max_pain:.2f} | Spot: ${spot:.2f} | {direction} {abs(distance_pct):.2f}%',
+            'x': 0.5,
+            'xanchor': 'center',
+            'font': {'size': 20, 'color': 'white', 'family': 'Arial Black'}
+        },
         xaxis_title="Precio Strike ($)",
-        yaxis_title="Dolor Total ($B)",
+        yaxis_title="Dolor Total - Payout de Dealers ($B)",
         template="plotly_dark",
         height=450,
         showlegend=False,
-        hovermode='x unified'
+        hovermode='x unified',
+        xaxis=dict(
+            gridcolor='rgba(255,255,255,0.1)',
+            showgrid=True,
+            zeroline=False
+        ),
+        yaxis=dict(
+            gridcolor='rgba(255,255,255,0.1)',
+            showgrid=True,
+            zeroline=True,
+            zerolinecolor='rgba(255,255,255,0.2)'
+        )
     )
     
     return fig
@@ -369,25 +387,8 @@ def calculate_pinning_probability(max_pain: float, spot: float, gex: float, days
     # Probabilidad final
     probability = min(95, max(5, base_prob + expiry_factor + distance_factor + gex_factor))
     
-    # Sugerencia de trading
-    if probability > 70:
-        if max_pain > spot:
-            suggestion = "📈 COMPRAR: Alta probabilidad de subida hacia Max Pain"
-            strategy = "Comprar Calls ATM o Bull Call Spreads"
-        else:
-            suggestion = "📉 VENDER: Alta probabilidad de caída hacia Max Pain"
-            strategy = "Comprar Puts ATM o Bear Put Spreads"
-    elif probability > 50:
-        suggestion = "⚖️ NEUTRAL: Probabilidad moderada de pin"
-        strategy = "Iron Condors o Butterflies centrados en Max Pain"
-    else:
-        suggestion = "⚠️ CUIDADO: Baja probabilidad de pin"
-        strategy = "Evitar estrategias basadas en Max Pain"
-    
     return {
         'probability': probability,
-        'suggestion': suggestion,
-        'strategy': strategy,
         'direction': 'UP' if max_pain > spot else 'DOWN',
         'distance': distance_pct
     }
@@ -546,6 +547,121 @@ def create_cumulative_gex_plot(data: pd.DataFrame):
     
     return fig
 
+def display_probability_analysis_clean(max_pain, spot_price, metrics, prob_analysis):
+    """Diseño limpio y moderno para el análisis de probabilidad"""
+    
+    # Layout principal con 4 columnas para métricas clave
+    col1, col2, col3, col4 = st.columns([2, 1, 1, 2])
+    
+    with col1:
+        # Probabilidad con visual mejorado
+        prob = prob_analysis['probability']
+        
+        # Color y estado basado en probabilidad
+        if prob > 70:
+            color = "#00FF00"
+            bg_color = "rgba(0, 255, 0, 0.1)"
+            status = "SEÑAL FUERTE"
+            emoji = "🟢"
+        elif prob > 50:
+            color = "#FFD700"
+            bg_color = "rgba(255, 215, 0, 0.1)"
+            status = "SEÑAL MEDIA"
+            emoji = "🟡"
+        else:
+            color = "#FF6B6B"
+            bg_color = "rgba(255, 107, 107, 0.1)"
+            status = "SEÑAL DÉBIL"
+            emoji = "🔴"
+        
+        st.markdown(f"""
+        <div style='background: {bg_color}; border: 2px solid {color}; 
+                    border-radius: 15px; padding: 15px; text-align: center;'>
+            <div style='font-size: 36px; color: {color}; font-weight: bold;'>
+                {prob}%
+            </div>
+            <div style='color: {color}; font-size: 14px; margin-top: 5px;'>
+                {emoji} {status}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        # Días hasta expiración
+        days = metrics['days_to_expiry']
+        if days == 0:
+            st.markdown("""
+            <div style='text-align: center; padding: 10px;'>
+                <div style='font-size: 28px; color: #00FF00;'>0DTE</div>
+                <div style='color: #888; font-size: 11px;'>¡EXPIRA HOY!</div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div style='text-align: center; padding: 10px;'>
+                <div style='font-size: 28px; color: white;'>{days}d</div>
+                <div style='color: #888; font-size: 11px;'>Días Restantes</div>
+            </div>
+            """, unsafe_allow_html=True)
+    
+    with col3:
+        # Distancia
+        distance = prob_analysis['distance']
+        dist_color = "#00FF00" if distance < 1 else "#FFD700" if distance < 3 else "#FF6B6B"
+        st.markdown(f"""
+        <div style='text-align: center; padding: 10px;'>
+            <div style='font-size: 28px; color: {dist_color};'>{distance:.1f}%</div>
+            <div style='color: #888; font-size: 11px;'>Distancia</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col4:
+        # Dirección y velocidad
+        if max_pain != spot_price:
+            direction = "📈 ALCISTA" if max_pain > spot_price else "📉 BAJISTA"
+            target_move = abs(max_pain - spot_price)
+            speed = "Movimiento LENTO" if metrics['total_gex'] > 0 else "Movimiento RÁPIDO"
+            gex_sign = "GEX +" if metrics['total_gex'] > 0 else "GEX -"
+            
+            st.markdown(f"""
+            <div style='background: rgba(255,255,255,0.05); border-radius: 10px; padding: 10px;'>
+                <div style='color: white; font-size: 16px; font-weight: bold;'>{direction}</div>
+                <div style='color: #888; font-size: 12px; margin-top: 5px;'>
+                    Target: ${max_pain:.2f} (${target_move:.2f})<br>
+                    {speed} ({gex_sign})
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            <div style='background: rgba(0,255,0,0.1); border-radius: 10px; padding: 10px;'>
+                <div style='color: #00FF00; font-size: 16px; font-weight: bold;'>✅ EN EQUILIBRIO</div>
+                <div style='color: #888; font-size: 12px; margin-top: 5px;'>
+                    Precio en Max Pain<br>
+                    Baja volatilidad esperada
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+    
+    # Barra de progreso visual
+    st.markdown("---")
+    
+    progress_html = f"""
+    <div style='width: 100%; height: 30px; background: rgba(255,255,255,0.1); border-radius: 15px; overflow: hidden;'>
+        <div style='width: {prob}%; height: 100%; background: linear-gradient(90deg, #FF6B6B, #FFD700, #00FF00); 
+                    display: flex; align-items: center; justify-content: end; padding-right: 10px;
+                    transition: all 0.5s ease;'>
+            <span style='color: black; font-weight: bold;'>{prob}%</span>
+        </div>
+    </div>
+    <div style='display: flex; justify-content: space-between; margin-top: 5px; color: #888; font-size: 12px;'>
+        <span>0% - Muy Improbable</span>
+        <span>50% - Neutral</span>
+        <span>100% - Muy Probable</span>
+    </div>
+    """
+    st.markdown(progress_html, unsafe_allow_html=True)
+
 # INTERFAZ PRINCIPAL
 def main():
     # Header
@@ -577,7 +693,7 @@ def main():
             "Rango de Strikes (%)",
             min_value=5,
             max_value=50,
-            value=10,  # Reducido para mejor performance
+            value=10,
             step=5,
             help="Porcentaje alrededor del precio spot"
         )
@@ -586,7 +702,7 @@ def main():
             "Días Máximos hasta Vencimiento",
             min_value=7,
             max_value=180,
-            value=60,  # Reducido para mejor performance
+            value=60,
             step=7,
             help="Filtrar opciones por días hasta vencimiento"
         )
@@ -595,7 +711,7 @@ def main():
             "Interés Abierto Mínimo",
             min_value=0,
             max_value=10000,
-            value=500,  # Aumentado para mejor performance
+            value=500,
             step=100,
             help="Filtrar opciones con bajo interés abierto"
         )
@@ -780,45 +896,20 @@ def display_results(ticker, spot_price, option_data, strike_range, max_expiratio
     ])
     
     with tab1:
+        # Max Pain Chart
         fig = create_max_pain_chart_optimized(pain_by_strike, max_pain, spot_price)
         st.plotly_chart(fig, use_container_width=True)
         
-        # Análisis de probabilidad
+        # Análisis de probabilidad con diseño limpio
         st.markdown("#### 🎲 Análisis de Probabilidad de Pin")
         
+        # Calculate probability
         prob_analysis = calculate_pinning_probability(
             max_pain, spot_price, metrics['total_gex'], metrics['days_to_expiry']
         )
         
-        col1, col2, col3 = st.columns([1, 1, 2])
-        
-        with col1:
-            st.metric("📊 Probabilidad", f"{prob_analysis['probability']}%",
-                     delta=prob_analysis['direction'])
-            
-            if prob_analysis['probability'] > 70:
-                st.success("✅ SEÑAL FUERTE")
-            elif prob_analysis['probability'] > 50:
-                st.warning("⚖️ SEÑAL MODERADA")
-            else:
-                st.error("❌ SEÑAL DÉBIL")
-        
-        with col2:
-            st.metric("⏰ Días hasta Exp", f"{metrics['days_to_expiry']}d",
-                     delta="0DTE!" if metrics['days_to_expiry'] == 0 else None)
-            st.metric("📏 Distancia", f"{prob_analysis['distance']:.2f}%")
-        
-        with col3:
-            st.info(f"""
-            **{prob_analysis['suggestion']}**
-            
-            📊 **Estrategia:** {prob_analysis['strategy']}
-            
-            💡 **Factores:**
-            - {'✅ 0DTE' if metrics['days_to_expiry'] == 0 else f'📅 {metrics["days_to_expiry"]} días'}
-            - {'✅ GEX Positivo' if metrics['total_gex'] > 0 else '⚠️ GEX Negativo'}
-            - {'✅ Cerca' if prob_analysis['distance'] < 1 else '⚠️ Lejos'}
-            """)
+        # Usar el diseño limpio
+        display_probability_analysis_clean(max_pain, spot_price, metrics, prob_analysis)
     
     with tab2:
         fig = create_gex_by_strike_plot(spot_price, option_data, strike_range)
