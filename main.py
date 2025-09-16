@@ -1199,7 +1199,7 @@ def show_educational_content():
     # Footer
     st.markdown("""
     <div style='margin-top: 50px; padding: 20px; background: linear-gradient(135deg, rgba(0,217,255,0.1), rgba(254,83,187,0.1)); border-radius: 15px;'>
-        <h4 style='text-align: center;'>🚀 Desarrollado con pasión para la comunidad de trading cuantitativo</h4>
+        <h4 style='text-align: center;'>🚀 GEX ANALYSIS</h4>
         <p style='text-align: center;'>
             <a href='https://bquantfinance.com' style='color: #00D9FF;'>bquantfinance.com</a> | 
             <a href='https://twitter.com/Gsnchez' style='color: #FE53BB;'>@Gsnchez</a>
