@@ -15,6 +15,7 @@ import pandas as pd
 import numpy as np
 import requests
 from plotly.subplots import make_subplots
+from scipy import interpolate
 
 warnings.filterwarnings('ignore')
 
@@ -188,6 +189,308 @@ def calculate_gex_optimized(spot: float, data: pd.DataFrame, dealer_position: st
     df["days_to_expiry"] = (df["expiration"] - pd.Timestamp.now()).dt.days
     
     return df
+
+def calculate_gamma_profile(data: pd.DataFrame, spot: float, dealer_position: str = "standard") -> dict:
+    """OPTIMIZADO: Calcular el perfil gamma usando vectorización completa"""
+    
+    # Obtener strikes únicos y ordenados
+    strikes = np.sort(data['strike'].unique())
+    
+    # Crear rango de strikes para el perfil
+    strike_min = strikes.min()
+    strike_max = strikes.max()
+    
+    # Crear array de strikes para evaluación (200 puntos para suavidad)
+    profile_strikes = np.linspace(strike_min, strike_max, 200)
+    
+    # VECTORIZACIÓN: Preparar arrays de datos
+    option_strikes = data['strike'].values
+    option_gammas = data['gamma'].values
+    option_oi = data['open_interest'].values
+    option_types = data['type'].values
+    
+    # Crear matriz de distancias (broadcasting)
+    # Forma: [n_profile_strikes, n_options]
+    distances = np.abs(profile_strikes[:, np.newaxis] - option_strikes[np.newaxis, :])
+    
+    # Ancho de la distribución gamma (5% del strike)
+    widths = option_strikes * 0.05
+    
+    # Calcular contribuciones gamma usando broadcasting
+    # Función gaussiana vectorizada
+    gamma_contributions = option_gammas * np.exp(-(distances**2) / (2 * widths**2))
+    
+    # Multiplicar por open interest y factor de escala
+    gamma_values = gamma_contributions * option_oi * CONTRACT_SIZE * 0.01 / 1e9
+    
+    # Crear máscaras para calls y puts
+    is_call = option_types == 'C'
+    is_put = option_types == 'P'
+    
+    # Aplicar convención de signos según dealer position (vectorizado)
+    if dealer_position == "standard":
+        # Calls positivos, puts negativos
+        gamma_values[:, is_put] *= -1
+    elif dealer_position == "inverse":
+        # Calls negativos, puts positivos
+        gamma_values[:, is_call] *= -1
+    
+    # Sumar contribuciones (axis=1 suma sobre las opciones)
+    aggregate_gamma = np.sum(gamma_values, axis=1)
+    
+    # Calcular gamma separado para calls y puts
+    call_gamma = np.sum(gamma_values[:, is_call], axis=1) if np.any(is_call) else np.zeros_like(profile_strikes)
+    put_gamma = np.sum(gamma_values[:, is_put], axis=1) if np.any(is_put) else np.zeros_like(profile_strikes)
+    
+    # Calcular gamma flip usando interpolación vectorizada
+    zero_crossings = np.where(np.diff(np.sign(aggregate_gamma)))[0]
+    if len(zero_crossings) > 0:
+        idx = zero_crossings[0]
+        x1, x2 = profile_strikes[idx], profile_strikes[idx + 1]
+        y1, y2 = aggregate_gamma[idx], aggregate_gamma[idx + 1]
+        gamma_flip = x1 - y1 * (x2 - x1) / (y2 - y1)
+    else:
+        gamma_flip = spot
+    
+    # Calcular perfiles por vencimiento (optimizado)
+    unique_expiries = sorted(data['expiration'].unique())[:3]  # Top 3 expiraciones
+    expiry_profiles = {}
+    
+    for expiry in unique_expiries:
+        # Filtrar datos para esta expiración
+        expiry_mask = data['expiration'] == expiry
+        if not np.any(expiry_mask):
+            continue
+        
+        # Extraer datos relevantes
+        exp_strikes = data.loc[expiry_mask, 'strike'].values
+        exp_gammas = data.loc[expiry_mask, 'gamma'].values
+        exp_oi = data.loc[expiry_mask, 'open_interest'].values
+        exp_types = data.loc[expiry_mask, 'type'].values
+        
+        # Calcular distancias para esta expiración
+        exp_distances = np.abs(profile_strikes[:, np.newaxis] - exp_strikes[np.newaxis, :])
+        exp_widths = exp_strikes * 0.05
+        
+        # Contribuciones gamma
+        exp_gamma_contrib = exp_gammas * np.exp(-(exp_distances**2) / (2 * exp_widths**2))
+        exp_gamma_values = exp_gamma_contrib * exp_oi * CONTRACT_SIZE * 0.01 / 1e9
+        
+        # Aplicar signos
+        if dealer_position == "standard":
+            exp_gamma_values[:, exp_types == 'P'] *= -1
+        elif dealer_position == "inverse":
+            exp_gamma_values[:, exp_types == 'C'] *= -1
+        
+        # Sumar para obtener perfil de esta expiración
+        expiry_profiles[expiry] = np.sum(exp_gamma_values, axis=1)
+    
+    return {
+        'strikes': profile_strikes,
+        'aggregate_gamma': aggregate_gamma,
+        'call_gamma': call_gamma,
+        'put_gamma': put_gamma,
+        'gamma_flip': gamma_flip,
+        'by_expiry': expiry_profiles
+    }
+
+def create_gamma_profile_chart(profiles: dict, spot: float, ticker: str):
+    """Crear gráfico de perfil gamma"""
+    fig = go.Figure()
+    
+    # Línea de gamma agregado (más gruesa y principal)
+    fig.add_trace(go.Scatter(
+        x=profiles['strikes'],
+        y=profiles['aggregate_gamma'],
+        mode='lines',
+        name='Aggregate Gamma',
+        line=dict(color='#00D9FF', width=3),
+        hovertemplate='Strike: $%{x:.2f}<br>Gamma: %{y:.3f}B<br><extra></extra>'
+    ))
+    
+    # Líneas de calls y puts
+    fig.add_trace(go.Scatter(
+        x=profiles['strikes'],
+        y=profiles['call_gamma'],
+        mode='lines',
+        name='Call Gamma',
+        line=dict(color='#00FF00', width=2, dash='dash'),
+        opacity=0.7,
+        hovertemplate='Strike: $%{x:.2f}<br>Call Gamma: %{y:.3f}B<br><extra></extra>'
+    ))
+    
+    fig.add_trace(go.Scatter(
+        x=profiles['strikes'],
+        y=profiles['put_gamma'],
+        mode='lines',
+        name='Put Gamma',
+        line=dict(color='#FF6B6B', width=2, dash='dash'),
+        opacity=0.7,
+        hovertemplate='Strike: $%{x:.2f}<br>Put Gamma: %{y:.3f}B<br><extra></extra>'
+    ))
+    
+    # Línea horizontal en cero
+    fig.add_hline(y=0, line_dash="solid", line_color="rgba(255,255,255,0.3)", line_width=1)
+    
+    # Línea vertical para el spot
+    fig.add_vline(
+        x=spot,
+        line_dash="dash",
+        line_color="#FFD700",
+        line_width=2,
+        annotation_text=f"{ticker} Spot: ${spot:.2f}",
+        annotation_position="top left"
+    )
+    
+    # Línea vertical para gamma flip
+    if 'gamma_flip' in profiles and profiles['gamma_flip'] != spot:
+        fig.add_vline(
+            x=profiles['gamma_flip'],
+            line_dash="dot",
+            line_color="#FE53BB",
+            line_width=2,
+            annotation_text=f"Gamma Flip: ${profiles['gamma_flip']:.2f}",
+            annotation_position="bottom right"
+        )
+    
+    # Sombreado de regiones positivas y negativas
+    fig.add_hrect(
+        y0=0, y1=profiles['aggregate_gamma'].max() * 1.1,
+        fillcolor="rgba(0, 255, 0, 0.05)",
+        layer="below",
+        line_width=0
+    )
+    
+    fig.add_hrect(
+        y0=profiles['aggregate_gamma'].min() * 1.1, y1=0,
+        fillcolor="rgba(255, 0, 0, 0.05)",
+        layer="below",
+        line_width=0
+    )
+    
+    fig.update_layout(
+        title={
+            'text': f'📈 Gamma Exposure Profile - {ticker}',
+            'x': 0.5,
+            'xanchor': 'center',
+            'font': {'size': 20, 'color': 'white', 'family': 'Arial Black'}
+        },
+        xaxis_title="Strike",
+        yaxis_title="Gamma Exposure ($ billions/1% move)",
+        template="plotly_dark",
+        height=500,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        ),
+        hovermode='x unified',
+        xaxis=dict(
+            gridcolor='rgba(255,255,255,0.1)',
+            showgrid=True,
+            zeroline=False
+        ),
+        yaxis=dict(
+            gridcolor='rgba(255,255,255,0.1)',
+            showgrid=True,
+            zeroline=True,
+            zerolinecolor='rgba(255,255,255,0.5)',
+            zerolinewidth=2
+        )
+    )
+    
+    return fig
+
+def create_gamma_profile_by_expiry(profiles: dict, spot: float, ticker: str):
+    """Crear gráfico de perfil gamma por vencimiento"""
+    fig = go.Figure()
+    
+    # Colores para diferentes vencimientos
+    colors = ['#00D9FF', '#FE53BB', '#00FF00', '#FFD700', '#FF6B6B']
+    
+    # Agregar línea para gamma total
+    fig.add_trace(go.Scatter(
+        x=profiles['strikes'],
+        y=profiles['aggregate_gamma'],
+        mode='lines',
+        name='All Expiries',
+        line=dict(color='#00D9FF', width=3),
+        hovertemplate='Strike: $%{x:.2f}<br>Total Gamma: %{y:.3f}B<br><extra></extra>'
+    ))
+    
+    # Agregar líneas para cada vencimiento
+    for i, (expiry, gamma_values) in enumerate(profiles['by_expiry'].items()):
+        expiry_str = expiry.strftime('%d %b')
+        color_idx = (i + 1) % len(colors)
+        
+        fig.add_trace(go.Scatter(
+            x=profiles['strikes'],
+            y=gamma_values,
+            mode='lines',
+            name=f'Expiry: {expiry_str}',
+            line=dict(color=colors[color_idx], width=2, dash='dot'),
+            opacity=0.8,
+            hovertemplate=f'Strike: $%{{x:.2f}}<br>{expiry_str} Gamma: %{{y:.3f}}B<br><extra></extra>'
+        ))
+    
+    # Línea horizontal en cero
+    fig.add_hline(y=0, line_dash="solid", line_color="rgba(255,255,255,0.3)", line_width=1)
+    
+    # Línea vertical para el spot
+    fig.add_vline(
+        x=spot,
+        line_dash="dash",
+        line_color="#FFD700",
+        line_width=2,
+        annotation_text=f"{ticker} Spot: ${spot:.2f}",
+        annotation_position="top left"
+    )
+    
+    # Línea vertical para gamma flip
+    if 'gamma_flip' in profiles:
+        fig.add_vline(
+            x=profiles['gamma_flip'],
+            line_dash="dot",
+            line_color="#FE53BB",
+            line_width=2,
+            annotation_text=f"Gamma Flip: ${profiles['gamma_flip']:.2f}",
+            annotation_position="bottom right"
+        )
+    
+    fig.update_layout(
+        title={
+            'text': f'📅 Gamma Profile by Expiration - {ticker}',
+            'x': 0.5,
+            'xanchor': 'center',
+            'font': {'size': 20, 'color': 'white', 'family': 'Arial Black'}
+        },
+        xaxis_title="Strike",
+        yaxis_title="Gamma Exposure ($ billions/1% move)",
+        template="plotly_dark",
+        height=500,
+        legend=dict(
+            orientation="v",
+            yanchor="top",
+            y=1,
+            xanchor="left",
+            x=1.02
+        ),
+        hovermode='x unified',
+        xaxis=dict(
+            gridcolor='rgba(255,255,255,0.1)',
+            showgrid=True
+        ),
+        yaxis=dict(
+            gridcolor='rgba(255,255,255,0.1)',
+            showgrid=True,
+            zeroline=True,
+            zerolinecolor='rgba(255,255,255,0.5)'
+        )
+    )
+    
+    return fig
 
 def calculate_max_pain_optimized(data: pd.DataFrame, spot_price: float) -> tuple:
     """OPTIMIZADO: Cálculo de Max Pain 10x más rápido usando NumPy"""
@@ -764,7 +1067,7 @@ def main():
                         option_data = calculate_gex_optimized(spot_price, option_data, dealer_position)
                         
                         # Step 5: Calculate metrics
-                        status.text('🎯 Calculando Max Pain...')
+                        status.text('🎯 Calculando Max Pain y Gamma Profile...')
                         progress_bar.progress(80)
                         
                         # Guardar en session state
@@ -772,7 +1075,8 @@ def main():
                         st.session_state.ticker_data = {
                             'ticker': ticker,
                             'spot': spot_price,
-                            'data': option_data
+                            'data': option_data,
+                            'dealer_position': dealer_position
                         }
                         
                         # Complete
@@ -784,7 +1088,7 @@ def main():
                         status.empty()
                         
                         # Mostrar resultados
-                        display_results(ticker, spot_price, option_data, strike_range, max_expiration_days)
+                        display_results(ticker, spot_price, option_data, strike_range, max_expiration_days, dealer_position)
                     else:
                         progress_bar.empty()
                         status.empty()
@@ -808,13 +1112,14 @@ def main():
         ticker = st.session_state.ticker_data['ticker']
         spot_price = st.session_state.ticker_data['spot']
         option_data = st.session_state.ticker_data['data']
-        display_results(ticker, spot_price, option_data, strike_range, max_expiration_days)
+        dealer_position = st.session_state.ticker_data.get('dealer_position', 'standard')
+        display_results(ticker, spot_price, option_data, strike_range, max_expiration_days, dealer_position)
     
     # Guía educativa
     else:
         show_educational_content()
 
-def display_results(ticker, spot_price, option_data, strike_range, max_expiration_days):
+def display_results(ticker, spot_price, option_data, strike_range, max_expiration_days, dealer_position='standard'):
     """Mostrar resultados del análisis"""
     
     # Calcular todas las métricas de una vez
@@ -823,9 +1128,12 @@ def display_results(ticker, spot_price, option_data, strike_range, max_expiratio
     # Calcular Max Pain
     max_pain, pain_by_strike, total_pain = calculate_max_pain_optimized(option_data, spot_price)
     
+    # Calcular Gamma Profile
+    gamma_profiles = calculate_gamma_profile(option_data, spot_price, dealer_position)
+    
     # Métricas principales
     st.markdown("### 📊 Métricas Principales")
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
     
     with col1:
         st.metric("💰 Precio Spot", f"${spot_price:.2f}")
@@ -835,15 +1143,19 @@ def display_results(ticker, spot_price, option_data, strike_range, max_expiratio
                  delta=f"{((max_pain-spot_price)/spot_price*100):+.1f}%")
     
     with col3:
+        st.metric("🔄 Gamma Flip", f"${gamma_profiles['gamma_flip']:.2f}",
+                 delta=f"{((gamma_profiles['gamma_flip']-spot_price)/spot_price*100):+.1f}%")
+    
+    with col4:
         st.metric("📊 GEX Total", f"${metrics['total_gex']:.2f}B",
                  delta="Positivo" if metrics['total_gex'] > 0 else "Negativo",
                  delta_color="normal" if metrics['total_gex'] > 0 else "inverse")
     
-    with col4:
+    with col5:
         st.metric("📈 GEX Calls", f"${metrics['call_gex']:.2f}B",
                  delta=f"{(metrics['call_gex']/metrics['total_gex']*100):.1f}%" if metrics['total_gex'] != 0 else "0%")
     
-    with col5:
+    with col6:
         st.metric("📉 GEX Puts", f"${metrics['put_gex']:.2f}B",
                  delta=f"P/C: {metrics['put_call_ratio']:.2f}")
     
@@ -885,13 +1197,15 @@ def display_results(ticker, spot_price, option_data, strike_range, max_expiratio
             - Baja volatilidad esperada
             """)
     
-    # Tabs
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "💎 MAX PAIN", 
+    # Tabs con Gamma Profile añadido
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+        "💎 MAX PAIN",
+        "📈 Gamma Profile", 
         "📊 Por Strike", 
         "📅 Por Vencimiento", 
         "🎯 Calls vs Puts", 
-        "📈 GEX Acumulativo", 
+        "📈 GEX Acumulativo",
+        "📅 Gamma por Expiry",
         "📋 Datos"
     ])
     
@@ -912,6 +1226,74 @@ def display_results(ticker, spot_price, option_data, strike_range, max_expiratio
         display_probability_analysis_clean(max_pain, spot_price, metrics, prob_analysis)
     
     with tab2:
+        # Gamma Profile Chart
+        st.markdown("#### 📈 Perfil de Exposición Gamma")
+        
+        # Información sobre gamma flip
+        if gamma_profiles['gamma_flip'] != spot_price:
+            gamma_flip_dist = ((gamma_profiles['gamma_flip'] - spot_price) / spot_price * 100)
+            if gamma_flip_dist > 0:
+                st.info(f"""
+                **🔄 Gamma Flip @ ${gamma_profiles['gamma_flip']:.2f}** ({gamma_flip_dist:+.1f}% arriba)
+                - Por encima: Dealers largos gamma (venden rallies)
+                - Por debajo: Dealers cortos gamma (compran rallies)
+                - Nivel crítico de cambio en comportamiento del mercado
+                """)
+            else:
+                st.info(f"""
+                **🔄 Gamma Flip @ ${gamma_profiles['gamma_flip']:.2f}** ({abs(gamma_flip_dist):.1f}% abajo)
+                - Por encima: Dealers largos gamma (venden rallies)
+                - Por debajo: Dealers cortos gamma (compran rallies)
+                - Nivel crítico de cambio en comportamiento del mercado
+                """)
+        
+        fig = create_gamma_profile_chart(gamma_profiles, spot_price, ticker)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Análisis adicional del perfil gamma
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("##### 🎯 Zonas de Soporte/Resistencia")
+            # Identificar picos en el perfil gamma
+            gamma_peaks = []
+            gamma_data = gamma_profiles['aggregate_gamma']
+            strikes = gamma_profiles['strikes']
+            
+            # Encontrar máximos locales significativos
+            for i in range(1, len(gamma_data)-1):
+                if gamma_data[i] > gamma_data[i-1] and gamma_data[i] > gamma_data[i+1]:
+                    if abs(gamma_data[i]) > 0.1:  # Umbral mínimo
+                        gamma_peaks.append((strikes[i], gamma_data[i]))
+            
+            if gamma_peaks:
+                gamma_peaks.sort(key=lambda x: abs(x[1]), reverse=True)
+                for strike, gex in gamma_peaks[:3]:  # Top 3 picos
+                    if gex > 0:
+                        st.write(f"🟢 Soporte en ${strike:.2f} (GEX: {gex:.2f}B)")
+                    else:
+                        st.write(f"🔴 Resistencia en ${strike:.2f} (GEX: {abs(gex):.2f}B)")
+        
+        with col2:
+            st.markdown("##### 📊 Interpretación del Perfil")
+            max_gamma = max(gamma_profiles['aggregate_gamma'])
+            min_gamma = min(gamma_profiles['aggregate_gamma'])
+            
+            if max_gamma > abs(min_gamma):
+                st.success("""
+                **Perfil Gamma Positivo Dominante**
+                - Mercado tiende a estabilidad
+                - Reversión a la media esperada
+                - Volatilidad comprimida
+                """)
+            else:
+                st.warning("""
+                **Perfil Gamma Negativo Dominante**
+                - Mercado propenso a movimientos bruscos
+                - Posibles rupturas de rango
+                - Volatilidad expandida
+                """)
+    
+    with tab3:
         fig = create_gex_by_strike_plot(spot_price, option_data, strike_range)
         st.plotly_chart(fig, use_container_width=True)
         
@@ -927,7 +1309,7 @@ def display_results(ticker, spot_price, option_data, strike_range, max_expiratio
                 distance = ((strike - spot_price) / spot_price * 100)
                 st.write(f"{distance:+.1f}%")
     
-    with tab3:
+    with tab4:
         fig = create_gex_by_expiration_plot(option_data, max_expiration_days)
         st.plotly_chart(fig, use_container_width=True)
         
@@ -944,7 +1326,7 @@ def display_results(ticker, spot_price, option_data, strike_range, max_expiratio
             with col3:
                 st.write(f"{days} días")
     
-    with tab4:
+    with tab5:
         fig = create_strike_distribution_plot(spot_price, option_data)
         st.plotly_chart(fig, use_container_width=True)
         
@@ -964,7 +1346,7 @@ def display_results(ticker, spot_price, option_data, strike_range, max_expiratio
             - OI: {metrics['put_oi']:,.0f}
             """)
     
-    with tab5:
+    with tab6:
         fig = create_cumulative_gex_plot(option_data)
         st.plotly_chart(fig, use_container_width=True)
         
@@ -989,7 +1371,37 @@ def display_results(ticker, spot_price, option_data, strike_range, max_expiratio
             with cols[i]:
                 st.metric(period, f"${period_gex:.2f}B")
     
-    with tab6:
+    with tab7:
+        # Gamma Profile por Expiración
+        st.markdown("#### 📅 Perfil Gamma por Fecha de Vencimiento")
+        fig = create_gamma_profile_by_expiry(gamma_profiles, spot_price, ticker)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Análisis de vencimientos
+        st.markdown("##### 📊 Análisis de Vencimientos")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.info("""
+            **📌 Importancia de Vencimientos**
+            - Los vencimientos cercanos tienen mayor impacto
+            - 0DTE y weeklies generan mayor pinning
+            - Monthly OPEX concentra mayor volumen
+            """)
+        
+        with col2:
+            # Calcular concentración de gamma por vencimiento
+            exp_concentration = {}
+            for expiry, gamma_vals in gamma_profiles['by_expiry'].items():
+                exp_concentration[expiry] = sum(abs(g) for g in gamma_vals)
+            
+            if exp_concentration:
+                st.markdown("**🎯 Concentración de Gamma**")
+                for expiry, conc in sorted(exp_concentration.items(), key=lambda x: x[1], reverse=True):
+                    days_to_exp = (expiry - datetime.now()).days
+                    st.write(f"• {expiry.strftime('%d %b')}: {conc:.1f}B ({days_to_exp}d)")
+    
+    with tab8:
         st.markdown("#### 📋 Datos de Opciones")
         
         col1, col2, col3 = st.columns(3)
@@ -1030,11 +1442,11 @@ def show_educational_content():
     """Contenido educativo"""
     st.markdown("""
     <div class='info-box'>
-    <h2>📚 GEX + Max Pain: La Combinación Perfecta</h2>
+    <h2>📚 GEX + Max Pain + Gamma Profile: La Trinidad del Trading</h2>
     </div>
     """, unsafe_allow_html=True)
     
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     
     with col1:
         st.markdown("""
@@ -1065,6 +1477,20 @@ def show_educational_content():
         **Mejor uso:** 0DTE y días de expiración
         """)
     
+    with col3:
+        st.markdown("""
+        ### 📈 Gamma Profile
+        
+        **Gamma Profile** muestra cómo varía la exposición gamma por strikes.
+        
+        **Elementos clave:**
+        - **Gamma Flip**: Punto donde gamma = 0
+        - **Picos positivos**: Niveles de soporte
+        - **Picos negativos**: Niveles de resistencia
+        
+        **Uso:** Identificar rangos y breakouts
+        """)
+    
     st.markdown("""
     ### 🎯 Cómo Usar Esta Herramienta
     
@@ -1073,13 +1499,22 @@ def show_educational_content():
     3. **Analice los resultados**:
        - Max Pain vs Spot = Dirección esperada
        - GEX = Velocidad del movimiento
+       - Gamma Profile = Niveles clave y comportamiento
        - Probabilidad = Confianza en la señal
     
     ### 📈 Mejores Prácticas
     
     - **0DTE**: Máxima efectividad de Max Pain
+    - **Gamma Flip**: Nivel crítico para cambios de régimen
     - **GEX Positivo + Max Pain**: Señales más confiables
     - **Filtrar por OI**: Use mínimo 500 para datos relevantes
+    
+    ### 🔄 Interpretación del Gamma Profile
+    
+    - **Gamma agregado > 0**: Dealers venden rallies, compran caídas (estabilidad)
+    - **Gamma agregado < 0**: Dealers compran rallies, venden caídas (volatilidad)
+    - **Cruces por cero**: Niveles donde cambia el comportamiento del mercado
+    - **Picos de gamma**: Actúan como imanes de precio
     """)
     
     # Footer
