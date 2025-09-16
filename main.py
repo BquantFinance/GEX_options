@@ -1204,9 +1204,6 @@ def show_educational_content():
             <a href='https://bquantfinance.com' style='color: #00D9FF;'>bquantfinance.com</a> | 
             <a href='https://twitter.com/Gsnchez' style='color: #FE53BB;'>@Gsnchez</a>
         </p>
-        <p style='text-align: center; color: #888; font-size: 12px;'>
-            Max Pain + GEX = El edge que necesitas para ganar consistentemente
-        </p>
     </div>
     """, unsafe_allow_html=True)
 
