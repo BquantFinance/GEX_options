@@ -943,12 +943,12 @@ def chart_price_with_levels(price_df: pd.DataFrame, spot: float, max_pain: float
         x=price_df["date"], open=price_df["open"], high=price_df["high"],
         low=price_df["low"], close=price_df["close"],
         increasing_line_color="#00FF88", decreasing_line_color="#FF4466",
-        increasing_fillcolor="#00FF8844", decreasing_fillcolor="#FF446644",
+        increasing_fillcolor="rgba(0,255,136,0.25)", decreasing_fillcolor="rgba(255,68,102,0.25)",
         name="Price",
     ))
 
     # Volume bars on secondary y
-    vol_colors = ["#00FF8833" if c >= o else "#FF446633"
+    vol_colors = ["rgba(0,255,136,0.2)" if c >= o else "rgba(255,68,102,0.2)"
                   for c, o in zip(price_df["close"], price_df["open"])]
     fig.add_trace(go.Bar(
         x=price_df["date"], y=price_df["volume"],
@@ -984,18 +984,18 @@ def chart_price_with_levels(price_df: pd.DataFrame, spot: float, max_pain: float
         fig.add_annotation(
             x=last_date, y=upper,
             text=f" {label} ${upper:.2f}", showarrow=False,
-            xanchor="left", font=dict(size=9, color="#00D9FF88"),
+            xanchor="left", font=dict(size=9, color="rgba(0,217,255,0.53)"),
         )
         fig.add_annotation(
             x=last_date, y=lower,
             text=f" {label} ${lower:.2f}", showarrow=False,
-            xanchor="left", font=dict(size=9, color="#00D9FF88"),
+            xanchor="left", font=dict(size=9, color="rgba(0,217,255,0.53)"),
         )
 
     # ── Call/Put Walls ──
     if walls["biggest_call"]:
         cw = walls["biggest_call"]["strike"]
-        fig.add_hline(y=cw, line_dash="dot", line_color="#00FF8888", line_width=1)
+        fig.add_hline(y=cw, line_dash="dot", line_color="rgba(0,255,136,0.53)", line_width=1)
         fig.add_annotation(
             x=first_date, y=cw, text=f"CALL WALL ${cw:.0f} ({walls['biggest_call']['oi']:,} OI)",
             showarrow=False, xanchor="left",
@@ -1004,7 +1004,7 @@ def chart_price_with_levels(price_df: pd.DataFrame, spot: float, max_pain: float
 
     if walls["biggest_put"]:
         pw = walls["biggest_put"]["strike"]
-        fig.add_hline(y=pw, line_dash="dot", line_color="#FF446688", line_width=1)
+        fig.add_hline(y=pw, line_dash="dot", line_color="rgba(255,68,102,0.53)", line_width=1)
         fig.add_annotation(
             x=first_date, y=pw, text=f"PUT WALL ${pw:.0f} ({walls['biggest_put']['oi']:,} OI)",
             showarrow=False, xanchor="left",
@@ -1088,10 +1088,10 @@ def chart_levels_map(spot: float, max_pain: float, gamma_flip: float,
         ))
 
     # Spot horizontal line
-    fig.add_hline(y=spot, line_dash="solid", line_color="#FFD70066", line_width=2)
-    fig.add_hline(y=max_pain, line_dash="dash", line_color="#00FF8844", line_width=1.5)
+    fig.add_hline(y=spot, line_dash="solid", line_color="rgba(255,215,0,0.4)", line_width=2)
+    fig.add_hline(y=max_pain, line_dash="dash", line_color="rgba(0,255,136,0.27)", line_width=1.5)
     if gamma_flip != spot:
-        fig.add_hline(y=gamma_flip, line_dash="dash", line_color="#FE53BB44", line_width=1.5)
+        fig.add_hline(y=gamma_flip, line_dash="dash", line_color="rgba(254,83,187,0.27)", line_width=1.5)
 
     fig.update_layout(**_base_layout(
         title=dict(text=f"{ticker} — Key Levels Map", font=dict(size=18)),
