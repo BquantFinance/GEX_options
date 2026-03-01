@@ -1257,7 +1257,7 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
     let autoRotate = true, showWire = true;
 
     const scene = new THREE.Scene();
-    scene.fog = new THREE.FogExp2(0x06090F, 0.012);
+    scene.fog = new THREE.FogExp2(0x06090F, 0.008);
     const camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 200);
     const renderer = new THREE.WebGLRenderer({{ antialias:true, alpha:true }});
     renderer.setSize(window.innerWidth, window.innerHeight);
@@ -1295,7 +1295,7 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
         for (let i = 0; i < nS; i++) {{
             const idx = j * nS + i;
             const iv = lookup[D.strikes[i] + ',' + D.dtes[j]] || 0;
-            const h = ((iv - minIV) / ivRange) * 7;
+            const h = ((iv - minIV) / ivRange) * 14;
             const pi = idx * 3;
             geo.attributes.position.array[pi + 2] = -h;
 
@@ -1347,32 +1347,32 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
     const ss = new THREE.SphereGeometry(0.22, 32, 32);
     const sm = new THREE.MeshBasicMaterial({{ color:0xFFD700, transparent:true, opacity:0.95 }});
     const sMesh = new THREE.Mesh(ss, sm);
-    sMesh.position.set(spotX, 5, 0);
+    sMesh.position.set(spotX, 16, 0);
     scene.add(sMesh);
 
     // Glow
     const gs = new THREE.SphereGeometry(0.5, 32, 32);
     const gm = new THREE.MeshBasicMaterial({{ color:0xFFD700, transparent:true, opacity:0.1 }});
     const gMesh = new THREE.Mesh(gs, gm);
-    gMesh.position.set(spotX, 5, 0);
+    gMesh.position.set(spotX, 16, 0);
     scene.add(gMesh);
 
     // Beam
-    const bg = new THREE.CylinderGeometry(0.012, 0.012, 10, 8);
+    const bg = new THREE.CylinderGeometry(0.012, 0.012, 20, 8);
     const bm = new THREE.MeshBasicMaterial({{ color:0xFFD700, transparent:true, opacity:0.15 }});
     const bMesh = new THREE.Mesh(bg, bm);
-    bMesh.position.set(spotX, 0, 0);
+    bMesh.position.set(spotX, 5, 0);
     scene.add(bMesh);
 
     // Spot plane slice (vertical plane at spot strike)
-    const planeGeo = new THREE.PlaneGeometry(0.02, 10);
+    const planeGeo = new THREE.PlaneGeometry(0.02, 20);
     const planeMat = new THREE.MeshBasicMaterial({{ color:0xFFD700, transparent:true, opacity:0.04, side:THREE.DoubleSide }});
     const planeMesh = new THREE.Mesh(planeGeo, planeMat);
-    planeMesh.position.set(spotX, 3, 0);
+    planeMesh.position.set(spotX, 5, 0);
     scene.add(planeMesh);
 
     // Camera control
-    let theta = 0.6, phi = 0.5, radius = 24;
+    let theta = 0.8, phi = 0.85, radius = 20;
     let mouseDown = false, lastX = 0, lastY = 0;
 
     renderer.domElement.addEventListener('mousedown', e => {{ mouseDown=true; lastX=e.clientX; lastY=e.clientY; }});
@@ -1404,7 +1404,7 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
         autoRotate = !autoRotate;
         document.getElementById('btnRotate').classList.toggle('active', autoRotate);
     }}
-    function resetCamera() {{ theta=0.6; phi=0.5; radius=24; }}
+    function resetCamera() {{ theta=0.8; phi=0.85; radius=20; }}
     function toggleWire() {{
         showWire = !showWire;
         wireMesh.visible = showWire;
@@ -1422,10 +1422,10 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
             Math.max(2, radius * Math.cos(phi)),
             radius * Math.sin(phi) * Math.sin(theta)
         );
-        camera.lookAt(0, 2, 0);
+        camera.lookAt(0, 4, 0);
 
         // Pulse spot
-        sMesh.position.y = 5 + Math.sin(t * 2) * 0.12;
+        sMesh.position.y = 16 + Math.sin(t * 2) * 0.15;
         gMesh.position.y = sMesh.position.y;
         gMesh.scale.setScalar(1 + Math.sin(t * 2.5) * 0.15);
 
