@@ -1332,6 +1332,61 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
     surfaceMesh.receiveShadow = true;
     scene.add(surfaceMesh);
 
+    // ── Skirt / Curtain: connects surface edges to floor ──
+    function buildSkirt(positions, nS, nD, W, Dp) {{
+        const edges = [];
+        // Front edge (j=0, all i)
+        for (let i = 0; i < nS; i++) edges.push({{ idx: i, x: -W/2 + (i/(nS-1))*W, z: -Dp/2 }});
+        // Back edge (j=nD-1, all i)
+        for (let i = 0; i < nS; i++) edges.push({{ idx: (nD-1)*nS + i, x: -W/2 + (i/(nS-1))*W, z: Dp/2 }});
+        // Left edge (i=0, all j)
+        for (let j = 0; j < nD; j++) edges.push({{ idx: j*nS, x: -W/2, z: -Dp/2 + (j/(nD-1))*Dp }});
+        // Right edge (i=nS-1, all j)
+        for (let j = 0; j < nD; j++) edges.push({{ idx: j*nS + (nS-1), x: W/2, z: -Dp/2 + (j/(nD-1))*Dp }});
+
+        const skirtVerts = [];
+        const skirtCols = [];
+
+        function addEdgeStrip(startIdx, count, getXZ) {{
+            for (let k = 0; k < count - 1; k++) {{
+                const e0 = edges[startIdx + k];
+                const e1 = edges[startIdx + k + 1];
+                const y0 = positions[e0.idx * 3 + 2]; // height from plane (mapped to Y after rotation)
+                const y1 = positions[e1.idx * 3 + 2];
+                const ci0 = e0.idx * 3, ci1 = e1.idx * 3;
+                const r0 = colors[ci0], g0 = colors[ci0+1], b0 = colors[ci0+2];
+                const r1 = colors[ci1], g1 = colors[ci1+1], b1 = colors[ci1+2];
+
+                // Two triangles: top0, top1, bottom1 and top0, bottom1, bottom0
+                // Top vertices use surface height, bottom uses 0
+                skirtVerts.push(e0.x, y0, e0.z,  e1.x, y1, e1.z,  e1.x, 0, e1.z);
+                skirtVerts.push(e0.x, y0, e0.z,  e1.x, 0, e1.z,   e0.x, 0, e0.z);
+                // Colors: top gets surface color, bottom fades to dark
+                skirtCols.push(r0,g0,b0, r1,g1,b1, r1*0.15,g1*0.15,b1*0.15);
+                skirtCols.push(r0,g0,b0, r1*0.15,g1*0.15,b1*0.15, r0*0.15,g0*0.15,b0*0.15);
+            }}
+        }}
+
+        addEdgeStrip(0, nS, null);              // front
+        addEdgeStrip(nS, nS, null);             // back
+        addEdgeStrip(nS*2, nD, null);           // left
+        addEdgeStrip(nS*2 + nD, nD, null);      // right
+
+        const skirtGeo = new THREE.BufferGeometry();
+        skirtGeo.setAttribute('position', new THREE.Float32BufferAttribute(skirtVerts, 3));
+        skirtGeo.setAttribute('color', new THREE.Float32BufferAttribute(skirtCols, 3));
+        skirtGeo.computeVertexNormals();
+        return skirtGeo;
+    }}
+
+    const skirtGeo = buildSkirt(geo.attributes.position.array, nS, nD, W, Dp);
+    const skirtMat = new THREE.MeshBasicMaterial({{
+        vertexColors: true, transparent: true, opacity: 0.5, side: THREE.DoubleSide
+    }});
+    const skirtMesh = new THREE.Mesh(skirtGeo, skirtMat);
+    skirtMesh.rotation.x = -Math.PI / 2;
+    scene.add(skirtMesh);
+
     // Wireframe overlay
     const wireGeo = geo.clone();
     const wireMat = new THREE.MeshBasicMaterial({{ color:0xffffff, wireframe:true, transparent:true, opacity:0.06 }});
