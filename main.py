@@ -1297,7 +1297,7 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
             const iv = lookup[D.strikes[i] + ',' + D.dtes[j]] || 0;
             const h = ((iv - minIV) / ivRange) * 14;
             const pi = idx * 3;
-            geo.attributes.position.array[pi + 2] = -h;
+            geo.attributes.position.array[pi + 2] = h;
 
             // Color: deep blue → cyan → gold → orange → red
             const t = (iv - minIV) / ivRange;
