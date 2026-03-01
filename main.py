@@ -1026,7 +1026,7 @@ def chart_gamma_heatmap(data: pd.DataFrame, spot: float, strike_range: float) ->
             [1.0, "#00D9FF"],
         ],
         zmid=0,
-        colorbar=dict(title="GEX ($M)", titlefont=dict(size=11)),
+        colorbar=dict(title=dict(text="GEX ($M)", font=dict(size=11, color="#7A8BA8"))),
         hovertemplate="Strike: %{y}<br>Expiry: %{x}<br>GEX: $%{z:.1f}M<extra></extra>",
     ))
 
