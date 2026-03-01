@@ -1438,7 +1438,7 @@ def chart_cumulative_gex(data: pd.DataFrame) -> go.Figure:
 
 
 def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, metrics: dict):
-    """Render 3D Implied Volatility surface using Plotly"""
+    """Render 3D IV surface — Three.js, direct XYZ geometry, cinematic"""
     if "iv" not in data.columns or data["iv"].isna().all():
         st.warning("IV data not available for 3D surface.")
         return
@@ -1452,7 +1452,6 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
         st.warning("Not enough IV data to build 3D surface.")
         return
 
-    # Build IV grid: merge puts below ATM, calls above ATM for clean smile
     rows = []
     for exp in df["expiration"].unique():
         edf = df[df["expiration"] == exp]
@@ -1468,7 +1467,6 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
         return
 
     iv_df = pd.DataFrame(rows)
-
     n_strike_bins = min(40, iv_df["strike"].nunique())
     n_dte_bins = min(25, iv_df["dte"].nunique())
     strike_bins = np.linspace(iv_df["strike"].min(), iv_df["strike"].max(), n_strike_bins + 1)
@@ -1476,142 +1474,400 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
     dte_bins = np.linspace(0, dte_max, n_dte_bins + 1)
     iv_df["s_bin"] = pd.cut(iv_df["strike"], bins=strike_bins, labels=strike_bins[:-1]).astype(float)
     iv_df["d_bin"] = pd.cut(iv_df["dte"], bins=dte_bins, labels=dte_bins[:-1]).astype(float)
-
     pivot = iv_df.pivot_table(values="iv", index="s_bin", columns="d_bin", aggfunc="mean")
     pivot = pivot.interpolate(axis=0, limit=3).interpolate(axis=1, limit=3).bfill().ffill().fillna(0)
 
-    strikes_arr = np.array([float(s) for s in pivot.index])
-    dtes_arr = np.array([float(d) for d in pivot.columns])
-    iv_matrix = pivot.values  # shape: (n_strikes, n_dtes)
+    strikes_list = [float(s) for s in pivot.index]
+    dtes_list = [float(d) for d in pivot.columns]
+    nS = len(strikes_list)
+    nD = len(dtes_list)
 
-    fig = go.Figure()
+    grid = []
+    for si, sv in enumerate(strikes_list):
+        for di, dv in enumerate(dtes_list):
+            grid.append({"s": sv, "d": dv, "iv": round(float(pivot.iloc[si, di]), 2)})
 
-    # ── Main surface ──
-    fig.add_trace(go.Surface(
-        x=dtes_arr,        # DTE on x-axis
-        y=strikes_arr,     # Strike on y-axis
-        z=iv_matrix,       # IV% on z-axis
-        colorscale=[
-            [0.00, "#003060"],
-            [0.15, "#005599"],
-            [0.30, "#0099CC"],
-            [0.45, "#00D9FF"],
-            [0.55, "#88CC44"],
-            [0.65, "#FFD700"],
-            [0.78, "#FF8800"],
-            [0.90, "#FF4422"],
-            [1.00, "#CC1100"],
-        ],
-        colorbar=dict(
-            title=dict(text="IV %", font=dict(color="#7A8BA8", size=11)),
-            tickfont=dict(color="#7A8BA8", size=10),
-            thickness=14, len=0.65, x=1.02,
-            bgcolor="rgba(0,0,0,0)",
-            borderwidth=0,
-            ticksuffix="%",
-        ),
-        hovertemplate=(
-            "<b>Strike:</b> $%{y:.1f}<br>"
-            "<b>DTE:</b> %{x:.0f}d<br>"
-            "<b>IV:</b> %{z:.1f}%%<br>"
-            "<extra></extra>"
-        ),
-        opacity=0.92,
-        contours=dict(
-            z=dict(show=True, usecolormap=True, highlightcolor="white",
-                   project=dict(z=True), size=2),
-        ),
-        lighting=dict(
-            ambient=0.4, diffuse=0.6, specular=0.3,
-            roughness=0.5, fresnel=0.2,
-        ),
-        lightposition=dict(x=-50, y=100, z=50),
-    ))
+    n_stk = min(6, nS)
+    stk_idx = [int(i * (nS - 1) / max(n_stk - 1, 1)) for i in range(n_stk)]
+    stk_labels = [{"i": i, "v": round(strikes_list[i], 1)} for i in stk_idx]
+    n_dt = min(5, nD)
+    dt_idx = [int(i * (nD - 1) / max(n_dt - 1, 1)) for i in range(n_dt)]
+    dt_labels = [{"i": i, "v": int(dtes_list[i])} for i in dt_idx]
 
-    # ── ATM line on surface (spot strike) ──
-    spot_idx = np.abs(strikes_arr - spot).argmin()
-    atm_ivs = iv_matrix[spot_idx, :]
-    fig.add_trace(go.Scatter3d(
-        x=dtes_arr, y=np.full_like(dtes_arr, strikes_arr[spot_idx]), z=atm_ivs + 0.3,
-        mode="lines", line=dict(color="#FFD700", width=6),
-        name=f"ATM (${spot:.0f})",
-        hovertemplate="ATM IV: %{z:.1f}%<br>DTE: %{x:.0f}d<extra></extra>",
-    ))
+    iv_min_v = float(pivot[pivot > 0].min().min()) if (pivot > 0).any().any() else 10
+    iv_max_v = float(pivot.max().max())
 
-    # ── Spot marker ──
-    spot_dte_mid = dtes_arr[len(dtes_arr) // 2]
-    spot_iv = iv_matrix[spot_idx, len(dtes_arr) // 2]
-    fig.add_trace(go.Scatter3d(
-        x=[spot_dte_mid], y=[spot], z=[spot_iv + 1],
-        mode="markers+text",
-        marker=dict(size=8, color="#FFD700", symbol="diamond",
-                    line=dict(width=1, color="white")),
-        text=[f"SPOT ${spot:.1f}"], textfont=dict(color="#FFD700", size=11),
-        textposition="top center", name="Spot",
-        hoverinfo="skip",
-    ))
+    json_data = json.dumps({
+        "grid": grid, "spot": spot, "nS": nS, "nD": nD,
+        "strikes": strikes_list, "dtes": dtes_list,
+        "stkLabels": stk_labels, "dtLabels": dt_labels,
+        "ivMin": round(iv_min_v, 1), "ivMax": round(iv_max_v, 1),
+        "ivMean": round(metrics["iv_mean"] * 100, 1),
+        "ivSkew": round(metrics["iv_skew"] * 100, 1),
+    })
 
-    # ── IV reference planes (horizontal annotations at key levels) ──
-    iv_min = float(iv_matrix[iv_matrix > 0].min()) if (iv_matrix > 0).any() else 10
-    iv_max = float(iv_matrix.max())
+    html = f"""
+    <!DOCTYPE html><html><head>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+    *{{margin:0;padding:0;box-sizing:border-box}}
+    body{{overflow:hidden;background:#06090F;font-family:'JetBrains Mono',monospace}}
+    canvas{{display:block;filter:contrast(1.04) saturate(1.12)}}
 
-    # Layout
-    fig.update_layout(
-        scene=dict(
-            xaxis=dict(
-                title=dict(text="DTE (Days)", font=dict(color="#FE53BB", size=12)),
-                backgroundcolor="rgba(6,9,15,0)",
-                gridcolor="rgba(0,217,255,0.06)",
-                showbackground=True,
-                tickfont=dict(color="#7A8BA8", size=10),
-                dtick=max(1, int(dte_max / 5)),
-                ticksuffix="d",
-                linecolor="rgba(0,217,255,0.15)",
-                zerolinecolor="rgba(0,217,255,0.1)",
-            ),
-            yaxis=dict(
-                title=dict(text="Strike ($)", font=dict(color="#00D9FF", size=12)),
-                backgroundcolor="rgba(6,9,15,0)",
-                gridcolor="rgba(0,217,255,0.06)",
-                showbackground=True,
-                tickfont=dict(color="#7A8BA8", size=10),
-                tickprefix="$",
-                linecolor="rgba(0,217,255,0.15)",
-                zerolinecolor="rgba(0,217,255,0.1)",
-            ),
-            zaxis=dict(
-                title=dict(text="IV (%)", font=dict(color="#FFD700", size=12)),
-                backgroundcolor="rgba(6,9,15,0)",
-                gridcolor="rgba(255,215,0,0.06)",
-                showbackground=True,
-                tickfont=dict(color="#7A8BA8", size=10),
-                ticksuffix="%",
-                linecolor="rgba(255,215,0,0.15)",
-                zerolinecolor="rgba(255,215,0,0.1)",
-                range=[max(0, iv_min - 3), iv_max + 3],
-            ),
-            bgcolor="#06090F",
-            camera=dict(
-                eye=dict(x=1.6, y=-1.8, z=0.9),
-                up=dict(x=0, y=0, z=1),
-                center=dict(x=0, y=0, z=-0.05),
-            ),
-            aspectratio=dict(x=1.2, y=1.4, z=0.7),
-        ),
-        paper_bgcolor="#06090F",
-        plot_bgcolor="#06090F",
-        font=dict(family="JetBrains Mono, monospace", color="#7A8BA8"),
-        margin=dict(l=0, r=0, t=0, b=0),
-        height=620,
-        showlegend=True,
-        legend=dict(
-            x=0.01, y=0.99, bgcolor="rgba(6,9,15,0.8)",
-            bordercolor="rgba(0,217,255,0.1)", borderwidth=1,
-            font=dict(size=10, color="#7A8BA8"),
-        ),
-    )
+    .vig{{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:5;
+      background:radial-gradient(ellipse at 50% 50%,transparent 55%,rgba(6,9,15,0.55) 100%)}}
 
-    st.plotly_chart(fig, use_container_width=True)
+    .hud{{position:absolute;top:14px;left:16px;z-index:10;pointer-events:none}}
+    .hud-c{{
+      background:rgba(6,9,15,0.82);backdrop-filter:blur(20px);
+      border:1px solid rgba(0,217,255,0.1);border-radius:14px;
+      padding:14px 20px;color:#7A8BA8;font-size:11px;min-width:180px;
+      box-shadow:0 8px 32px rgba(0,0,0,0.4),0 0 60px rgba(0,217,255,0.03),inset 0 1px 0 rgba(255,255,255,0.03)}}
+    .hud-t{{font-size:18px;font-weight:700;letter-spacing:-0.5px;margin-bottom:8px;
+      background:linear-gradient(135deg,#00D9FF,#FE53BB 60%,#FFD700);
+      -webkit-background-clip:text;-webkit-text-fill-color:transparent}}
+    .hud-r{{display:flex;justify-content:space-between;margin-top:5px}}
+    .hud-l{{color:#4A5568;font-size:9px;text-transform:uppercase;letter-spacing:1.2px}}
+    .hud-v{{color:#E8ECF4;font-weight:600;font-size:12px}}
+
+    .ctr{{position:absolute;top:14px;right:16px;display:flex;gap:6px;z-index:10}}
+    .ctr button{{
+      background:rgba(11,17,32,0.8);backdrop-filter:blur(12px);
+      border:1px solid rgba(0,217,255,0.12);color:#7A8BA8;
+      padding:7px 16px;border-radius:20px;font-size:10px;cursor:pointer;
+      font-family:inherit;transition:all .25s;letter-spacing:0.3px}}
+    .ctr button:hover{{border-color:rgba(0,217,255,0.35);color:#E8ECF4;
+      box-shadow:0 0 15px rgba(0,217,255,0.08)}}
+    .ctr button.on{{background:rgba(0,217,255,0.1);color:#00D9FF;border-color:rgba(0,217,255,0.25)}}
+
+    #tip{{position:absolute;display:none;z-index:20;pointer-events:none;
+      background:rgba(6,9,15,0.92);backdrop-filter:blur(16px);
+      border:1px solid rgba(0,217,255,0.2);border-radius:10px;
+      padding:10px 14px;font-size:11px;color:#E8ECF4;
+      box-shadow:0 8px 30px rgba(0,0,0,0.5),0 0 40px rgba(0,217,255,0.05)}}
+    #tip b{{color:#00D9FF}}
+    .tip-iv{{font-size:18px;font-weight:700;margin:2px 0 4px;
+      background:linear-gradient(90deg,#00D9FF,#FFD700);
+      -webkit-background-clip:text;-webkit-text-fill-color:transparent}}
+
+    .leg{{position:absolute;bottom:14px;left:16px;z-index:10;pointer-events:none;
+      background:rgba(6,9,15,0.8);backdrop-filter:blur(12px);
+      border:1px solid rgba(0,217,255,0.06);border-radius:10px;
+      padding:10px 16px;font-size:9px;color:#4A5568}}
+    .leg .bar{{width:150px;height:6px;border-radius:3px;margin:5px 0;
+      background:linear-gradient(90deg,#0a1628,#003366,#0088cc,#00D9FF,#88CC44,#FFD700,#FF6633,#FF2200)}}
+
+    .axi{{position:absolute;bottom:14px;right:16px;z-index:10;pointer-events:none;
+      background:rgba(6,9,15,0.8);backdrop-filter:blur(12px);
+      border:1px solid rgba(0,217,255,0.06);border-radius:10px;
+      padding:8px 14px;font-size:9px;color:#4A5568;line-height:2}}
+    </style></head><body>
+    <div class="vig"></div>
+
+    <div class="hud"><div class="hud-c">
+      <div class="hud-t">Vol Surface</div>
+      <div class="hud-r"><span class="hud-l">Spot</span><span class="hud-v" style="color:#FFD700">${spot:.2f}</span></div>
+      <div class="hud-r"><span class="hud-l">IV Mean</span><span class="hud-v">{metrics['iv_mean']*100:.1f}%</span></div>
+      <div class="hud-r"><span class="hud-l">IV Skew</span><span class="hud-v" style="color:{'#FF4466' if metrics['iv_skew']>0 else '#00FF88'}">{metrics['iv_skew']*100:+.1f}%</span></div>
+      <div class="hud-r"><span class="hud-l">Range</span><span class="hud-v" style="font-size:10px">{iv_min_v:.0f}% — {iv_max_v:.0f}%</span></div>
+    </div></div>
+
+    <div class="ctr">
+      <button id="bRot" class="on" onclick="autoRot=!autoRot;this.classList.toggle('on')">⟳ Rotate</button>
+      <button onclick="th=0.6;ph=0.7;rad=26">↺ Reset</button>
+      <button id="bW" class="on" onclick="wire.visible=!wire.visible;this.classList.toggle('on')">◻ Wire</button>
+      <button id="bR" class="on" onclick="refs.visible=!refs.visible;this.classList.toggle('on')">▧ Labels</button>
+    </div>
+    <div id="tip"></div>
+
+    <div class="leg">
+      <div style="color:#7A8BA8;font-weight:600;letter-spacing:1px">IV SCALE</div>
+      <div class="bar"></div>
+      <div style="display:flex;justify-content:space-between"><span>{iv_min_v:.0f}%</span><span>{iv_max_v:.0f}%</span></div>
+      <div style="margin-top:6px;line-height:1.8"><span style="color:#FFD700">◆ ATM / Spot</span><br>
+        <span style="color:rgba(0,217,255,0.5)">─ IV Planes</span></div>
+    </div>
+
+    <div class="axi">
+      <span style="color:#00D9FF;font-weight:600">X →</span> Strike ($)<br>
+      <span style="color:#FFD700;font-weight:600">Y ↑</span> IV (%)<br>
+      <span style="color:#FE53BB;font-weight:600">Z →</span> DTE
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+    const D={json_data};
+    const nS=D.nS,nD=D.nD,W=20,Dep=14,H=10;
+    const lk={{}};D.grid.forEach(p=>{{lk[p.s+','+p.d]=p.iv}});
+    const ivMin=D.ivMin,ivMax=D.ivMax,ivR=ivMax-ivMin||1;
+    let autoRot=true,th=0.6,ph=0.7,rad=26,md=false,lx=0,ly=0;
+
+    /* ═══ Scene ═══ */
+    const sc=new THREE.Scene();
+    sc.fog=new THREE.FogExp2(0x06090F,0.003);
+    const cam=new THREE.PerspectiveCamera(45,innerWidth/innerHeight,0.1,300);
+    const R=new THREE.WebGLRenderer({{antialias:true,alpha:true,powerPreference:'high-performance'}});
+    R.setSize(innerWidth,innerHeight);
+    R.setPixelRatio(Math.min(devicePixelRatio,2));
+    R.setClearColor(0x06090F);
+    R.shadowMap.enabled=true;
+    R.shadowMap.type=THREE.PCFSoftShadowMap;
+    document.body.appendChild(R.domElement);
+
+    /* ═══ Lights ═══ */
+    sc.add(new THREE.AmbientLight(0x1a2840,0.6));
+    const dL=new THREE.DirectionalLight(0xffffff,0.8);
+    dL.position.set(10,25,10);dL.castShadow=true;
+    dL.shadow.mapSize.set(1024,1024);sc.add(dL);
+    const pA=new THREE.PointLight(0x00D9FF,1.5,60);pA.position.set(-15,12,-10);sc.add(pA);
+    const pB=new THREE.PointLight(0xFE53BB,1.0,60);pB.position.set(15,12,12);sc.add(pB);
+    const pC=new THREE.PointLight(0xFFD700,0.6,40);pC.position.set(0,18,0);sc.add(pC);
+    const pD=new THREE.PointLight(0x00D9FF,0.3,30);pD.position.set(0,-2,0);sc.add(pD);
+
+    /* ═══ Floor ═══ */
+    const flG=new THREE.PlaneGeometry(50,50);
+    const flM=new THREE.MeshPhongMaterial({{color:0x080c14,specular:0x111828,shininess:80,transparent:true,opacity:0.85}});
+    const fl=new THREE.Mesh(flG,flM);
+    fl.rotation.x=-Math.PI/2;fl.position.y=-0.1;fl.receiveShadow=true;sc.add(fl);
+    sc.add(new THREE.GridHelper(40,40,0x0d1525,0x0a0f1c));
+
+    /* ═══ Color function ═══ */
+    function ivCol(t){{
+      let r,g,b;
+      if(t<0.2){{const s=t/0.2;r=0.04;g=0.06+s*0.15;b=0.15+s*0.35}}
+      else if(t<0.4){{const s=(t-0.2)/0.2;r=0;g=0.21+s*0.5;b=0.5+s*0.5}}
+      else if(t<0.55){{const s=(t-0.4)/0.15;r=s*0.2;g=0.71+s*0.17;b=1.0-s*0.15}}
+      else if(t<0.7){{const s=(t-0.55)/0.15;r=0.2+s*0.8;g=0.88-s*0.05;b=0.85-s*0.65}}
+      else if(t<0.85){{const s=(t-0.7)/0.15;r=1.0;g=0.83-s*0.45;b=0.2-s*0.1}}
+      else{{const s=(t-0.85)/0.15;r=1.0-s*0.15;g=0.38-s*0.25;b=0.1-s*0.05}}
+      return[r,g,b]
+    }}
+
+    /* ═══ Build surface (direct XYZ, no rotation) ═══ */
+    const vs=[],cs=[],ix=[];
+    for(let j=0;j<nD;j++){{
+      for(let i=0;i<nS;i++){{
+        const x=-W/2+(i/(nS-1||1))*W;
+        const z=-Dep/2+(j/(nD-1||1))*Dep;
+        const iv=lk[D.strikes[i]+','+D.dtes[j]]||0;
+        const t=Math.max(0,Math.min(1,(iv-ivMin)/ivR));
+        vs.push(x,t*H,z);
+        const[cr,cg,cb]=ivCol(t);
+        cs.push(cr,cg,cb);
+      }}
+    }}
+    for(let j=0;j<nD-1;j++)
+      for(let i=0;i<nS-1;i++){{
+        const a=j*nS+i,b=a+1,c=(j+1)*nS+i,d=c+1;
+        ix.push(a,b,d, a,d,c);
+      }}
+
+    const sG=new THREE.BufferGeometry();
+    sG.setAttribute('position',new THREE.Float32BufferAttribute(vs,3));
+    sG.setAttribute('color',new THREE.Float32BufferAttribute(cs,3));
+    sG.setIndex(ix);
+    sG.computeVertexNormals();
+
+    const sM=new THREE.MeshPhongMaterial({{
+      vertexColors:true,side:THREE.DoubleSide,
+      shininess:120,transparent:true,opacity:0.90,
+      specular:0x334466
+    }});
+    const surf=new THREE.Mesh(sG,sM);
+    surf.castShadow=true;surf.receiveShadow=true;sc.add(surf);
+
+    /* Edge glow */
+    const glM=new THREE.MeshBasicMaterial({{vertexColors:true,transparent:true,opacity:0.05,side:THREE.BackSide,depthWrite:false}});
+    const glow=new THREE.Mesh(sG.clone(),glM);
+    glow.scale.set(1.01,1.05,1.01);sc.add(glow);
+
+    /* Wireframe */
+    const wM=new THREE.MeshBasicMaterial({{color:0xffffff,wireframe:true,transparent:true,opacity:0.035}});
+    const wire=new THREE.Mesh(sG.clone(),wM);
+    sc.add(wire);
+
+    /* ═══ ATM line + spot ═══ */
+    const sI=D.strikes.reduce((b,s,i)=>Math.abs(s-D.spot)<Math.abs(D.strikes[b]-D.spot)?i:b,0);
+    const sX=-W/2+(sI/(nS-1||1))*W;
+
+    // ATM curve on surface
+    const ap=[];
+    for(let j=0;j<nD;j++){{
+      const iv=lk[D.strikes[sI]+','+D.dtes[j]]||0;
+      const t=Math.max(0,Math.min(1,(iv-ivMin)/ivR));
+      ap.push(new THREE.Vector3(sX,t*H+0.06,-Dep/2+(j/(nD-1||1))*Dep));
+    }}
+    sc.add(new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(ap),
+      new THREE.LineBasicMaterial({{color:0xFFD700,transparent:true,opacity:0.75}})
+    ));
+
+    // Beam
+    const bmG=new THREE.CylinderGeometry(0.01,0.01,H+4,8);
+    const bmM=new THREE.MeshBasicMaterial({{color:0xFFD700,transparent:true,opacity:0.06}});
+    const bm=new THREE.Mesh(bmG,bmM);bm.position.set(sX,(H+4)/2,0);sc.add(bm);
+
+    // Diamond
+    const diG=new THREE.OctahedronGeometry(0.25);
+    const diM=new THREE.MeshPhongMaterial({{color:0xFFD700,emissive:0xFFD700,emissiveIntensity:0.4,shininess:200}});
+    const dia=new THREE.Mesh(diG,diM);dia.position.set(sX,H+1.5,0);sc.add(dia);
+    const dgM=new THREE.MeshBasicMaterial({{color:0xFFD700,transparent:true,opacity:0.06}});
+    const dgl=new THREE.Mesh(new THREE.SphereGeometry(0.6,16,16),dgM);
+    dgl.position.copy(dia.position);sc.add(dgl);
+
+    /* ═══ References group ═══ */
+    const refs=new THREE.Group();
+
+    function mkT(text,color,sz){{
+      const c=document.createElement('canvas');c.width=256;c.height=64;
+      const x=c.getContext('2d');
+      x.font=(sz||30)+'px JetBrains Mono,monospace';
+      x.fillStyle=color||'#7A8BA8';
+      x.textAlign='center';x.textBaseline='middle';
+      x.fillText(text,128,32);
+      const t=new THREE.CanvasTexture(c);t.minFilter=THREE.LinearFilter;
+      const sp=new THREE.Sprite(new THREE.SpriteMaterial({{map:t,transparent:true,opacity:0.7,depthWrite:false}}));
+      sp.scale.set(2.2,0.55,1);return sp
+    }}
+
+    // Strike labels (X front)
+    D.stkLabels.forEach(s=>{{
+      const x=-W/2+(s.i/(nS-1||1))*W;
+      const lb=mkT('$'+s.v.toFixed(0),'#00D9FF',26);
+      lb.position.set(x,-0.5,Dep/2+1.2);refs.add(lb);
+      const tg=new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(x,0,Dep/2+0.2),new THREE.Vector3(x,0,Dep/2+0.6)]);
+      refs.add(new THREE.Line(tg,new THREE.LineBasicMaterial({{color:0x00D9FF,transparent:true,opacity:0.2}})));
+    }});
+
+    // DTE labels (Z left)
+    D.dtLabels.forEach(d=>{{
+      const z=-Dep/2+(d.i/(nD-1||1))*Dep;
+      const lb=mkT(d.v+'d','#FE53BB',26);
+      lb.position.set(-W/2-1.6,-0.5,z);refs.add(lb);
+      const tg=new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(-W/2-0.2,0,z),new THREE.Vector3(-W/2-0.6,0,z)]);
+      refs.add(new THREE.Line(tg,new THREE.LineBasicMaterial({{color:0xFE53BB,transparent:true,opacity:0.2}})));
+    }});
+
+    // IV% labels (Y left) + ref planes
+    const ivSt=[];
+    for(let p=Math.ceil(ivMin/5)*5;p<=ivMax;p+=Math.max(5,Math.round((ivMax-ivMin)/4/5)*5))ivSt.push(p);
+    if(ivSt.length>5){{const st=Math.ceil(ivSt.length/4);ivSt.splice(0,ivSt.length,...ivSt.filter((_,i)=>i%st===0))}}
+
+    ivSt.forEach(iv=>{{
+      const y=((iv-ivMin)/ivR)*H;
+      const lb=mkT(iv+'%','#00D9FF',24);
+      lb.position.set(-W/2-2.3,y,-Dep/2);refs.add(lb);
+      // Glass ref plane
+      const pg=new THREE.PlaneGeometry(W,Dep);
+      const pm=new THREE.MeshBasicMaterial({{color:0x00D9FF,transparent:true,opacity:0.012,side:THREE.DoubleSide,depthWrite:false}});
+      const p=new THREE.Mesh(pg,pm);p.rotation.x=-Math.PI/2;p.position.set(0,y,0);refs.add(p);
+      // Edge border
+      const pts=[new THREE.Vector3(-W/2,y,-Dep/2),new THREE.Vector3(W/2,y,-Dep/2),
+        new THREE.Vector3(W/2,y,Dep/2),new THREE.Vector3(-W/2,y,Dep/2),new THREE.Vector3(-W/2,y,-Dep/2)];
+      refs.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
+        new THREE.LineBasicMaterial({{color:0x00D9FF,transparent:true,opacity:0.05}})));
+    }});
+
+    // Axis titles
+    const t1=mkT('STRIKE →','#00D9FF',22);t1.position.set(0,-0.5,Dep/2+2.5);refs.add(t1);
+    const t2=mkT('← DTE','#FE53BB',22);t2.position.set(-W/2-1.6,-0.5,-Dep/2-1.2);refs.add(t2);
+    const t3=mkT('IV% ↑','#FFD700',22);t3.position.set(-W/2-2.3,H*0.5,Dep/2);refs.add(t3);
+
+    // Spot label above diamond
+    const spL=mkT('SPOT $'+D.spot.toFixed(1),'#FFD700',28);
+    spL.position.set(sX,H+2.8,0);refs.add(spL);
+
+    // Bounding box edges for structure
+    const bxPts=[
+      [-W/2,0,-Dep/2],[-W/2,0,Dep/2],[-W/2,H,-Dep/2],[-W/2,H,Dep/2],
+      [W/2,0,-Dep/2],[W/2,0,Dep/2]];
+    // Left wall vertical edges
+    [[0,2],[1,3]].forEach(([a,b])=>{{
+      const pts=[new THREE.Vector3(...bxPts[a]),new THREE.Vector3(...bxPts[b])];
+      refs.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
+        new THREE.LineBasicMaterial({{color:0x0d1525,transparent:true,opacity:0.3}})));
+    }});
+    // Bottom edges
+    [[0,1],[0,4],[1,5],[4,5]].forEach(([a,b])=>{{
+      const pts=[new THREE.Vector3(...bxPts[a]),new THREE.Vector3(...bxPts[b])];
+      refs.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
+        new THREE.LineBasicMaterial({{color:0x0d1525,transparent:true,opacity:0.15}})));
+    }});
+
+    sc.add(refs);
+
+    /* ═══ Raycasting tooltip ═══ */
+    const rc=new THREE.Raycaster();
+    const mv=new THREE.Vector2();
+    const tipE=document.getElementById('tip');
+
+    R.domElement.addEventListener('mousemove',e=>{{
+      mv.x=(e.clientX/innerWidth)*2-1;
+      mv.y=-(e.clientY/innerHeight)*2+1;
+      rc.setFromCamera(mv,cam);
+      const h=rc.intersectObject(surf);
+      if(h.length>0){{
+        const p=h[0].point;
+        const si=Math.round(((p.x+W/2)/W)*(nS-1));
+        const di=Math.round(((p.z+Dep/2)/Dep)*(nD-1));
+        if(si>=0&&si<nS&&di>=0&&di<nD){{
+          const iv=lk[D.strikes[si]+','+D.dtes[di]]||0;
+          tipE.style.display='block';
+          tipE.style.left=(e.clientX+16)+'px';
+          tipE.style.top=(e.clientY-10)+'px';
+          tipE.innerHTML=`<div class="tip-iv">${{iv.toFixed(1)}}%</div>
+            <b>Strike:</b> $${{D.strikes[si].toFixed(1)}}<br>
+            <b>DTE:</b> ${{D.dtes[di].toFixed(0)}}d`;
+        }}
+      }}else tipE.style.display='none';
+    }});
+
+    /* ═══ Camera ═══ */
+    const cv=R.domElement;
+    cv.addEventListener('mousedown',e=>{{md=true;lx=e.clientX;ly=e.clientY}});
+    cv.addEventListener('mousemove',e=>{{if(!md)return;
+      th-=(e.clientX-lx)*0.005;
+      ph=Math.max(0.1,Math.min(1.45,ph+(e.clientY-ly)*0.005));
+      lx=e.clientX;ly=e.clientY}});
+    cv.addEventListener('mouseup',()=>md=false);
+    cv.addEventListener('mouseleave',()=>md=false);
+    cv.addEventListener('wheel',e=>{{rad=Math.max(10,Math.min(50,rad+e.deltaY*0.015))}});
+    cv.addEventListener('touchstart',e=>{{if(e.touches.length===1){{md=true;lx=e.touches[0].clientX;ly=e.touches[0].clientY}}}});
+    cv.addEventListener('touchmove',e=>{{if(!md||e.touches.length!==1)return;
+      th-=(e.touches[0].clientX-lx)*0.005;
+      ph=Math.max(0.1,Math.min(1.45,ph+(e.touches[0].clientY-ly)*0.005));
+      lx=e.touches[0].clientX;ly=e.touches[0].clientY}});
+    cv.addEventListener('touchend',()=>md=false);
+
+    /* ═══ Animate ═══ */
+    let t=0;
+    function anim(){{
+      requestAnimationFrame(anim);
+      t+=0.006;
+      if(autoRot)th+=0.001;
+      cam.position.set(rad*Math.sin(ph)*Math.cos(th),Math.max(2,rad*Math.cos(ph)),rad*Math.sin(ph)*Math.sin(th));
+      cam.lookAt(0,H*0.35,0);
+      dia.position.y=H+1.5+Math.sin(t*2.5)*0.12;
+      dia.rotation.y=t*1.5;
+      dgl.position.y=dia.position.y;
+      dgl.scale.setScalar(1+Math.sin(t*3)*0.15);
+      pA.position.x=-15+Math.sin(t*0.4)*4;
+      pB.position.z=12+Math.cos(t*0.3)*4;
+      pC.intensity=0.6+Math.sin(t*0.8)*0.1;
+      R.render(sc,cam)}}
+    anim();
+
+    addEventListener('resize',()=>{{
+      cam.aspect=innerWidth/innerHeight;
+      cam.updateProjectionMatrix();
+      R.setSize(innerWidth,innerHeight)}});
+    </script></body></html>"""
+
+    components.html(html, height=650, scrolling=False)
+
+
 
 
 def chart_vanna_charm(data: pd.DataFrame, spot: float, strike_range: float) -> go.Figure:
