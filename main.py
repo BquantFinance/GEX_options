@@ -800,6 +800,309 @@ def compute_all_metrics(data: pd.DataFrame, spot: float) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# NEW: PRICE DATA, WALL DETECTION, EXPECTED MOVE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=300)
+def fetch_price_data(ticker: str, days: int = 30) -> Optional[pd.DataFrame]:
+    """Fetch OHLCV price data from Yahoo Finance (stock price only, NOT options)"""
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        params = {"range": f"{days}d", "interval": "1d", "includePrePost": "false"}
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        data = r.json()
+
+        result = data["chart"]["result"][0]
+        timestamps = result["timestamp"]
+        quote = result["indicators"]["quote"][0]
+
+        df = pd.DataFrame({
+            "date": pd.to_datetime(timestamps, unit="s"),
+            "open": quote["open"],
+            "high": quote["high"],
+            "low": quote["low"],
+            "close": quote["close"],
+            "volume": quote["volume"],
+        }).dropna()
+        return df
+    except Exception:
+        return None
+
+
+def detect_walls(data: pd.DataFrame, spot: float, strike_range: float = 10, n_walls: int = 5) -> dict:
+    """Detect major call/put OI walls — largest OI clusters"""
+    lo = spot * (1 - strike_range / 100)
+    hi = spot * (1 + strike_range / 100)
+    df = data[(data["strike"] >= lo) & (data["strike"] <= hi)]
+
+    calls = df[df["type"] == "C"].groupby("strike").agg(
+        oi=("open_interest", "sum"), vol=("volume", "sum"), gex=("GEX", "sum")
+    ).sort_values("oi", ascending=False)
+
+    puts = df[df["type"] == "P"].groupby("strike").agg(
+        oi=("open_interest", "sum"), vol=("volume", "sum"), gex=("GEX", "sum")
+    ).sort_values("oi", ascending=False)
+
+    call_walls = []
+    for strike, row in calls.head(n_walls).iterrows():
+        dist = (strike - spot) / spot * 100
+        call_walls.append({
+            "strike": strike, "oi": int(row["oi"]), "vol": int(row["vol"]),
+            "gex": row["gex"], "dist_pct": dist,
+        })
+
+    put_walls = []
+    for strike, row in puts.head(n_walls).iterrows():
+        dist = (strike - spot) / spot * 100
+        put_walls.append({
+            "strike": strike, "oi": int(row["oi"]), "vol": int(row["vol"]),
+            "gex": row["gex"], "dist_pct": dist,
+        })
+
+    # Biggest single wall overall
+    biggest_call = call_walls[0] if call_walls else None
+    biggest_put = put_walls[0] if put_walls else None
+
+    return {
+        "call_walls": call_walls,
+        "put_walls": put_walls,
+        "biggest_call": biggest_call,
+        "biggest_put": biggest_put,
+    }
+
+
+def calculate_expected_move(data: pd.DataFrame, spot: float) -> dict:
+    """Calculate expected move from ATM IV for nearest expiry"""
+    nearest_exp = data["expiration"].min()
+    dte = max(1, (nearest_exp - pd.Timestamp.now()).days)
+
+    # Get ATM IV — options closest to spot
+    atm = data[data["expiration"] == nearest_exp].copy()
+    atm["dist"] = (atm["strike"] - spot).abs()
+    atm = atm.nsmallest(6, "dist")
+    atm_iv = atm["iv"].dropna().mean()
+
+    if pd.isna(atm_iv) or atm_iv <= 0:
+        atm_iv = data["iv"].dropna().median()
+    if pd.isna(atm_iv) or atm_iv <= 0:
+        atm_iv = 0.20  # fallback
+
+    # Expected move = spot × IV × sqrt(DTE/365)
+    sqrt_t = math.sqrt(dte / 365)
+    em_1sigma = spot * atm_iv * sqrt_t
+    em_2sigma = em_1sigma * 2
+
+    return {
+        "atm_iv": atm_iv,
+        "dte": dte,
+        "expiry": nearest_exp,
+        "em_1sigma": em_1sigma,
+        "em_2sigma": em_2sigma,
+        "em_1sigma_pct": (em_1sigma / spot) * 100,
+        "em_2sigma_pct": (em_2sigma / spot) * 100,
+        "upper_1s": spot + em_1sigma,
+        "lower_1s": spot - em_1sigma,
+        "upper_2s": spot + em_2sigma,
+        "lower_2s": spot - em_2sigma,
+    }
+
+
+def compute_0dte_metrics(data: pd.DataFrame, spot: float, dealer: str = "standard") -> Optional[dict]:
+    """Compute separate GEX/DEX metrics for 0DTE options only"""
+    today = pd.Timestamp.now().normalize()
+    dte0 = data[data["expiration"].dt.normalize() == today]
+
+    if dte0.empty:
+        return None
+
+    dte0_gex = calculate_gex(spot, dte0, dealer)
+    dte0_dex = calculate_dex(spot, dte0, dealer)
+
+    return {
+        "count": len(dte0),
+        "gex": dte0_gex["GEX"].sum() / 1e9,
+        "dex": dte0_dex["DEX"].sum() / 1e9 if "DEX" in dte0_dex.columns else 0,
+        "call_oi": int(dte0[dte0["type"] == "C"]["open_interest"].sum()),
+        "put_oi": int(dte0[dte0["type"] == "P"]["open_interest"].sum()),
+        "call_vol": int(dte0[dte0["type"] == "C"]["volume"].sum()),
+        "put_vol": int(dte0[dte0["type"] == "P"]["volume"].sum()),
+        "pct_of_total_gex": 0,  # filled below
+        "top_strike": float(dte0_gex.groupby("strike")["GEX"].sum().abs().idxmax()) if not dte0_gex.empty else spot,
+    }
+
+
+def chart_price_with_levels(price_df: pd.DataFrame, spot: float, max_pain: float,
+                            gamma_flip: float, metrics: dict, walls: dict,
+                            expected_move: dict, ticker: str) -> go.Figure:
+    """Candlestick chart with GEX levels + expected move cone overlay"""
+    fig = go.Figure()
+
+    # Candlestick
+    fig.add_trace(go.Candlestick(
+        x=price_df["date"], open=price_df["open"], high=price_df["high"],
+        low=price_df["low"], close=price_df["close"],
+        increasing_line_color="#00FF88", decreasing_line_color="#FF4466",
+        increasing_fillcolor="#00FF8844", decreasing_fillcolor="#FF446644",
+        name="Price",
+    ))
+
+    # Volume bars on secondary y
+    vol_colors = ["#00FF8833" if c >= o else "#FF446633"
+                  for c, o in zip(price_df["close"], price_df["open"])]
+    fig.add_trace(go.Bar(
+        x=price_df["date"], y=price_df["volume"],
+        marker_color=vol_colors, name="Volume",
+        yaxis="y2", opacity=0.3, showlegend=False,
+    ))
+
+    last_date = price_df["date"].iloc[-1]
+    first_date = price_df["date"].iloc[0]
+
+    # ── Level Lines ──
+    def add_level(price, color, name, dash="dash", width=1.5):
+        fig.add_hline(y=price, line_dash=dash, line_color=color, line_width=width, opacity=0.7)
+        fig.add_annotation(
+            x=last_date, y=price, text=f" {name}: ${price:.2f}",
+            showarrow=False, xanchor="left", font=dict(size=10, color=color),
+            bgcolor="rgba(6,9,15,0.8)", bordercolor=color, borderwidth=1,
+            borderpad=3,
+        )
+
+    add_level(max_pain, "#00FF88", "Max Pain", "dash", 2)
+    add_level(gamma_flip, "#FE53BB", "γ Flip", "dash", 2)
+    add_level(metrics["max_gex_strike"], "#00D9FF", "Max GEX", "dot", 1.5)
+
+    # ── Expected Move Cone ──
+    em = expected_move
+    for sigma, opacity, label in [(1, 0.12, "±1σ"), (2, 0.06, "±2σ")]:
+        upper = em[f"upper_{sigma}s"]
+        lower = em[f"lower_{sigma}s"]
+        fig.add_hrect(y0=lower, y1=upper,
+                      fillcolor=f"rgba(0,217,255,{opacity})",
+                      line_width=0, layer="below")
+        fig.add_annotation(
+            x=last_date, y=upper,
+            text=f" {label} ${upper:.2f}", showarrow=False,
+            xanchor="left", font=dict(size=9, color="#00D9FF88"),
+        )
+        fig.add_annotation(
+            x=last_date, y=lower,
+            text=f" {label} ${lower:.2f}", showarrow=False,
+            xanchor="left", font=dict(size=9, color="#00D9FF88"),
+        )
+
+    # ── Call/Put Walls ──
+    if walls["biggest_call"]:
+        cw = walls["biggest_call"]["strike"]
+        fig.add_hline(y=cw, line_dash="dot", line_color="#00FF8888", line_width=1)
+        fig.add_annotation(
+            x=first_date, y=cw, text=f"CALL WALL ${cw:.0f} ({walls['biggest_call']['oi']:,} OI)",
+            showarrow=False, xanchor="left",
+            font=dict(size=9, color="#00FF88"), bgcolor="rgba(0,255,136,0.08)",
+        )
+
+    if walls["biggest_put"]:
+        pw = walls["biggest_put"]["strike"]
+        fig.add_hline(y=pw, line_dash="dot", line_color="#FF446688", line_width=1)
+        fig.add_annotation(
+            x=first_date, y=pw, text=f"PUT WALL ${pw:.0f} ({walls['biggest_put']['oi']:,} OI)",
+            showarrow=False, xanchor="left",
+            font=dict(size=9, color="#FF4466"), bgcolor="rgba(255,68,102,0.08)",
+        )
+
+    fig.update_layout(**_base_layout(
+        title=dict(text=f"{ticker} — Price + GEX Levels", font=dict(size=18)),
+        height=520, showlegend=False,
+        xaxis=dict(rangeslider=dict(visible=False), type="date"),
+        yaxis=dict(title="Price ($)", side="right"),
+        yaxis2=dict(overlaying="y", side="left", showgrid=False, showticklabels=False,
+                    range=[0, price_df["volume"].max() * 4]),
+    ))
+    return fig
+
+
+def chart_levels_map(spot: float, max_pain: float, gamma_flip: float,
+                     metrics: dict, walls: dict, expected_move: dict,
+                     ticker: str) -> go.Figure:
+    """Visual levels map — all key strikes on a vertical price axis (CBOE data only)"""
+    fig = go.Figure()
+
+    em = expected_move
+    lo = em["lower_2s"] * 0.995
+    hi = em["upper_2s"] * 1.005
+
+    # ── Expected Move bands ──
+    fig.add_shape(type="rect", x0=0, x1=1, y0=em["lower_2s"], y1=em["upper_2s"],
+                  fillcolor="rgba(0,217,255,0.04)", line_width=0, xref="paper")
+    fig.add_shape(type="rect", x0=0, x1=1, y0=em["lower_1s"], y1=em["upper_1s"],
+                  fillcolor="rgba(0,217,255,0.08)", line_width=0, xref="paper")
+
+    # ── Build scatter of all levels ──
+    levels = []
+
+    # Spot
+    levels.append(dict(y=spot, x=0.5, text=f"SPOT ${spot:.2f}", color="#FFD700", size=16, symbol="diamond"))
+    # Max Pain
+    levels.append(dict(y=max_pain, x=0.35, text=f"Max Pain ${max_pain:.2f}", color="#00FF88", size=13, symbol="triangle-up"))
+    # Gamma Flip
+    if gamma_flip != spot:
+        levels.append(dict(y=gamma_flip, x=0.65, text=f"γ Flip ${gamma_flip:.2f}", color="#FE53BB", size=13, symbol="triangle-down"))
+    # Max GEX
+    levels.append(dict(y=metrics["max_gex_strike"], x=0.5, text=f"Max GEX ${metrics['max_gex_strike']:.2f}", color="#00D9FF", size=12, symbol="star"))
+
+    # EM bounds
+    for sigma, alpha in [(1, 0.7), (2, 0.4)]:
+        u, l = em[f"upper_{sigma}s"], em[f"lower_{sigma}s"]
+        fig.add_hline(y=u, line_dash="dot", line_color=f"rgba(0,217,255,{alpha})", line_width=1)
+        fig.add_hline(y=l, line_dash="dot", line_color=f"rgba(0,217,255,{alpha})", line_width=1)
+        fig.add_annotation(x=1, y=u, text=f" +{sigma}σ ${u:.2f}", xref="paper",
+                          showarrow=False, xanchor="left", font=dict(size=9, color=f"rgba(0,217,255,{alpha})"))
+        fig.add_annotation(x=1, y=l, text=f" -{sigma}σ ${l:.2f}", xref="paper",
+                          showarrow=False, xanchor="left", font=dict(size=9, color=f"rgba(0,217,255,{alpha})"))
+
+    # Call walls
+    for i, w in enumerate(walls["call_walls"][:3]):
+        oi_scale = w["oi"] / max(walls["call_walls"][0]["oi"], 1)
+        levels.append(dict(y=w["strike"], x=0.75 + i * 0.05,
+                          text=f"C Wall ${w['strike']:.0f} ({w['oi']:,})",
+                          color="#00FF88", size=8 + oi_scale * 8, symbol="triangle-right"))
+
+    # Put walls
+    for i, w in enumerate(walls["put_walls"][:3]):
+        oi_scale = w["oi"] / max(walls["put_walls"][0]["oi"], 1)
+        levels.append(dict(y=w["strike"], x=0.25 - i * 0.05,
+                          text=f"P Wall ${w['strike']:.0f} ({w['oi']:,})",
+                          color="#FF4466", size=8 + oi_scale * 8, symbol="triangle-left"))
+
+    # Plot all levels
+    for lv in levels:
+        fig.add_trace(go.Scatter(
+            x=[lv["x"]], y=[lv["y"]], mode="markers+text",
+            marker=dict(color=lv["color"], size=lv["size"], symbol=lv["symbol"],
+                       line=dict(width=1, color="rgba(255,255,255,0.3)")),
+            text=[lv["text"]], textposition="middle right" if lv["x"] < 0.5 else "middle left",
+            textfont=dict(size=10, color=lv["color"]),
+            hovertemplate=f"{lv['text']}<extra></extra>",
+            showlegend=False,
+        ))
+
+    # Spot horizontal line
+    fig.add_hline(y=spot, line_dash="solid", line_color="#FFD70066", line_width=2)
+    fig.add_hline(y=max_pain, line_dash="dash", line_color="#00FF8844", line_width=1.5)
+    if gamma_flip != spot:
+        fig.add_hline(y=gamma_flip, line_dash="dash", line_color="#FE53BB44", line_width=1.5)
+
+    fig.update_layout(**_base_layout(
+        title=dict(text=f"{ticker} — Key Levels Map", font=dict(size=18)),
+        height=520, showlegend=False,
+        xaxis=dict(showgrid=False, showticklabels=False, zeroline=False, range=[-0.1, 1.1]),
+        yaxis=dict(title="Price ($)", side="right", range=[lo, hi]),
+    ))
+    return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # CHART FACTORY
 # ═══════════════════════════════════════════════════════════════════════════════
 def _base_layout(**kwargs) -> dict:
@@ -1332,61 +1635,6 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
     surfaceMesh.receiveShadow = true;
     scene.add(surfaceMesh);
 
-    // ── Skirt / Curtain: connects surface edges to floor ──
-    function buildSkirt(positions, nS, nD, W, Dp) {{
-        const edges = [];
-        // Front edge (j=0, all i)
-        for (let i = 0; i < nS; i++) edges.push({{ idx: i, x: -W/2 + (i/(nS-1))*W, z: -Dp/2 }});
-        // Back edge (j=nD-1, all i)
-        for (let i = 0; i < nS; i++) edges.push({{ idx: (nD-1)*nS + i, x: -W/2 + (i/(nS-1))*W, z: Dp/2 }});
-        // Left edge (i=0, all j)
-        for (let j = 0; j < nD; j++) edges.push({{ idx: j*nS, x: -W/2, z: -Dp/2 + (j/(nD-1))*Dp }});
-        // Right edge (i=nS-1, all j)
-        for (let j = 0; j < nD; j++) edges.push({{ idx: j*nS + (nS-1), x: W/2, z: -Dp/2 + (j/(nD-1))*Dp }});
-
-        const skirtVerts = [];
-        const skirtCols = [];
-
-        function addEdgeStrip(startIdx, count, getXZ) {{
-            for (let k = 0; k < count - 1; k++) {{
-                const e0 = edges[startIdx + k];
-                const e1 = edges[startIdx + k + 1];
-                const y0 = positions[e0.idx * 3 + 2]; // height from plane (mapped to Y after rotation)
-                const y1 = positions[e1.idx * 3 + 2];
-                const ci0 = e0.idx * 3, ci1 = e1.idx * 3;
-                const r0 = colors[ci0], g0 = colors[ci0+1], b0 = colors[ci0+2];
-                const r1 = colors[ci1], g1 = colors[ci1+1], b1 = colors[ci1+2];
-
-                // Two triangles: top0, top1, bottom1 and top0, bottom1, bottom0
-                // Top vertices use surface height, bottom uses 0
-                skirtVerts.push(e0.x, y0, e0.z,  e1.x, y1, e1.z,  e1.x, 0, e1.z);
-                skirtVerts.push(e0.x, y0, e0.z,  e1.x, 0, e1.z,   e0.x, 0, e0.z);
-                // Colors: top gets surface color, bottom fades to dark
-                skirtCols.push(r0,g0,b0, r1,g1,b1, r1*0.15,g1*0.15,b1*0.15);
-                skirtCols.push(r0,g0,b0, r1*0.15,g1*0.15,b1*0.15, r0*0.15,g0*0.15,b0*0.15);
-            }}
-        }}
-
-        addEdgeStrip(0, nS, null);              // front
-        addEdgeStrip(nS, nS, null);             // back
-        addEdgeStrip(nS*2, nD, null);           // left
-        addEdgeStrip(nS*2 + nD, nD, null);      // right
-
-        const skirtGeo = new THREE.BufferGeometry();
-        skirtGeo.setAttribute('position', new THREE.Float32BufferAttribute(skirtVerts, 3));
-        skirtGeo.setAttribute('color', new THREE.Float32BufferAttribute(skirtCols, 3));
-        skirtGeo.computeVertexNormals();
-        return skirtGeo;
-    }}
-
-    const skirtGeo = buildSkirt(geo.attributes.position.array, nS, nD, W, Dp);
-    const skirtMat = new THREE.MeshBasicMaterial({{
-        vertexColors: true, transparent: true, opacity: 0.5, side: THREE.DoubleSide
-    }});
-    const skirtMesh = new THREE.Mesh(skirtGeo, skirtMat);
-    skirtMesh.rotation.x = -Math.PI / 2;
-    scene.add(skirtMesh);
-
     // Wireframe overlay
     const wireGeo = geo.clone();
     const wireMat = new THREE.MeshBasicMaterial({{ color:0xffffff, wireframe:true, transparent:true, opacity:0.06 }});
@@ -1713,6 +1961,10 @@ def render_sidebar():
         max_exp_days = st.slider("Max Expiry (days)", 7, 180, 60, 7)
         min_oi = st.number_input("Min Open Interest", 0, 10000, 500, 100)
 
+        st.markdown("##### Expiry Filter")
+        expiry_filter = st.selectbox("Focus", ["All Expirations", "0DTE Only", "≤ 7 DTE", "≤ 30 DTE"],
+            help="Filter options by time to expiry. 0DTE = same-day expiry only.")
+
         st.markdown("##### Dealer Positioning")
         dealer = st.selectbox("Assumption", ["standard", "inverse", "neutral"],
             format_func=lambda x: {
@@ -1722,6 +1974,10 @@ def render_sidebar():
             }[x])
 
         st.markdown("---")
+
+        st.markdown("##### Price Chart")
+        price_days = st.slider("Lookback (days)", 5, 90, 30, 5,
+            help="Historical price data from Yahoo Finance (stock OHLCV only)")
 
         # Compare tickers
         st.markdown("##### Multi-Ticker Compare")
@@ -1739,13 +1995,13 @@ def render_sidebar():
         </div>
         """, unsafe_allow_html=True)
 
-        return ticker, strike_range, max_exp_days, min_oi, dealer, analyze, compare_input
+        return ticker, strike_range, max_exp_days, min_oi, dealer, analyze, compare_input, expiry_filter, price_days
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DISPLAY RESULTS
 # ═══════════════════════════════════════════════════════════════════════════════
-def display_results(ticker, spot, data, strike_range, max_exp_days, dealer):
+def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, price_days=30):
     """Main results display"""
 
     # ── Calculations ──
@@ -1760,6 +2016,13 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer):
     profiles = calculate_gamma_profile(data, spot, dealer)
     prob = calculate_pinning_probability(max_pain, spot, metrics["total_gex"],
                                          metrics["days_to_expiry"], metrics["iv_mean"])
+
+    # NEW: Walls, Expected Move, 0DTE, Price data (Yahoo = stock OHLCV only, options = CBOE)
+    walls = detect_walls(data, spot, strike_range)
+    expected_move = calculate_expected_move(data, spot)
+    dte0_metrics = compute_0dte_metrics(data, spot, dealer)
+    price_df = fetch_price_data(ticker, price_days)
+    gamma_flip = profiles["gamma_flip"]
 
     # ── Key Levels Bar ──
     render_key_levels(spot, max_pain, profiles["gamma_flip"], metrics)
@@ -1811,8 +2074,9 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer):
 
     st.markdown("")
 
-    # ── Tabs — 7 focused tabs preserving original core ──
+    # ── Tabs ──
     tabs = st.tabs([
+        "📉 Price & Levels",
         "🎯 Max Pain",
         "📊 GEX Analysis",
         "📈 Gamma Profile",
@@ -1822,9 +2086,110 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer):
     ])
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # TAB 1 — MAX PAIN (original core + enhanced probability)
+    # TAB 1 — PRICE & LEVELS (NEW: candlestick + GEX levels + EM cone + walls)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     with tabs[0]:
+        if price_df is not None and not price_df.empty:
+            st.plotly_chart(
+                chart_price_with_levels(price_df, spot, max_pain, gamma_flip,
+                                        metrics, walls, expected_move, ticker),
+                use_container_width=True,
+            )
+        else:
+            st.plotly_chart(
+                chart_levels_map(spot, max_pain, gamma_flip, metrics, walls, expected_move, ticker),
+                use_container_width=True,
+            )
+
+        # ── Expected Move Panel ──
+        em = expected_move
+        st.markdown("##### Expected Move")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.metric("ATM IV", f"{em['atm_iv']*100:.1f}%")
+        with c2:
+            st.metric(f"±1σ ({em['dte']}d)", f"${em['em_1sigma']:.2f}",
+                      delta=f"±{em['em_1sigma_pct']:.2f}%")
+        with c3:
+            st.metric(f"±2σ ({em['dte']}d)", f"${em['em_2sigma']:.2f}",
+                      delta=f"±{em['em_2sigma_pct']:.2f}%")
+        with c4:
+            st.metric("Range", f"${em['lower_1s']:.2f} — ${em['upper_1s']:.2f}")
+
+        # ── Call & Put Walls ──
+        st.markdown("---")
+        st.markdown("##### Call & Put Walls")
+        wc1, wc2 = st.columns(2)
+        with wc1:
+            st.markdown("""
+            <div style="color:#00FF88; font-weight:700; font-size:13px; margin-bottom:8px;">📗 CALL WALLS (Resistance)</div>
+            """, unsafe_allow_html=True)
+            for w in walls["call_walls"][:5]:
+                bar_w = min(100, w["oi"] / max(walls["call_walls"][0]["oi"], 1) * 100)
+                st.markdown(f"""
+                <div style="margin-bottom:6px;">
+                    <div style="display:flex; justify-content:space-between; font-size:12px; font-family:var(--font-mono);">
+                        <span style="color:#E8ECF4; font-weight:600;">${w['strike']:.0f}</span>
+                        <span style="color:var(--text-secondary);">{w['oi']:,} OI</span>
+                        <span style="color:{'#00FF88' if w['dist_pct'] >= 0 else '#FF4466'};">{w['dist_pct']:+.1f}%</span>
+                    </div>
+                    <div style="width:100%; height:4px; background:rgba(255,255,255,0.04); border-radius:2px; margin-top:3px;">
+                        <div style="width:{bar_w}%; height:100%; background:linear-gradient(90deg, #00FF8800, #00FF88); border-radius:2px;"></div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+        with wc2:
+            st.markdown("""
+            <div style="color:#FF4466; font-weight:700; font-size:13px; margin-bottom:8px;">📕 PUT WALLS (Support)</div>
+            """, unsafe_allow_html=True)
+            for w in walls["put_walls"][:5]:
+                bar_w = min(100, w["oi"] / max(walls["put_walls"][0]["oi"], 1) * 100)
+                st.markdown(f"""
+                <div style="margin-bottom:6px;">
+                    <div style="display:flex; justify-content:space-between; font-size:12px; font-family:var(--font-mono);">
+                        <span style="color:#E8ECF4; font-weight:600;">${w['strike']:.0f}</span>
+                        <span style="color:var(--text-secondary);">{w['oi']:,} OI</span>
+                        <span style="color:{'#00FF88' if w['dist_pct'] >= 0 else '#FF4466'};">{w['dist_pct']:+.1f}%</span>
+                    </div>
+                    <div style="width:100%; height:4px; background:rgba(255,255,255,0.04); border-radius:2px; margin-top:3px;">
+                        <div style="width:{bar_w}%; height:100%; background:linear-gradient(90deg, #FF446600, #FF4466); border-radius:2px;"></div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+        # ── 0DTE Panel ──
+        if dte0_metrics:
+            st.markdown("---")
+            st.markdown("##### ⚡ 0DTE Dashboard")
+            z = dte0_metrics
+            total_gex_abs = abs(metrics["total_gex"])
+            pct_0dte = abs(z["gex"]) / total_gex_abs * 100 if total_gex_abs > 0 else 0
+
+            c1, c2, c3, c4, c5 = st.columns(5)
+            with c1:
+                st.metric("0DTE GEX", f"${z['gex']:.3f}B")
+            with c2:
+                st.metric("0DTE DEX", f"${z['dex']:.3f}B")
+            with c3:
+                st.metric("% of Total", f"{pct_0dte:.1f}%")
+            with c4:
+                st.metric("0DTE Call OI", f"{z['call_oi']:,}")
+            with c5:
+                st.metric("0DTE Put OI", f"{z['put_oi']:,}")
+
+            st.markdown(f"""
+            <div class="glass-card" style="margin-top:8px;">
+                <div style="color:var(--text-secondary); font-size:12px; line-height:1.7;">
+                    {'<b style="color:#FFD700;">⚡ High 0DTE concentration</b> — intraday gamma effects amplified. Watch for pin to <b style="color:#E8ECF4;">$' + f"{z['top_strike']:.0f}" + '</b> (max 0DTE GEX strike).' if pct_0dte > 30 else '<b style="color:var(--text-muted);">0DTE gamma is moderate</b> — multi-day expirations dominate positioning.'}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # TAB 2 — MAX PAIN
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    with tabs[1]:
         # Expiration selector
         available_expiries = sorted(data["expiration"].unique())
         expiry_labels = [f"{e.strftime('%b %d, %Y')} ({max(0,(e - pd.Timestamp.now()).days)}d)"
@@ -1885,7 +2250,7 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer):
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # TAB 2 — GEX ANALYSIS (merges original: by strike, by expiry, calls/puts, cumulative)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    with tabs[1]:
+    with tabs[2]:
         # Primary chart: GEX by Strike
         st.plotly_chart(chart_gex_by_strike(spot, data, strike_range), use_container_width=True)
 
@@ -1957,7 +2322,7 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer):
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # TAB 3 — GAMMA PROFILE (original + IV-weighted improvement)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    with tabs[2]:
+    with tabs[3]:
         st.plotly_chart(chart_gamma_profile(profiles, spot, ticker), use_container_width=True)
 
         c1, c2 = st.columns(2)
@@ -2006,7 +2371,7 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer):
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # TAB 4 — DEX & GREEKS (delta exposure + vanna + charm)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    with tabs[3]:
+    with tabs[4]:
         # DEX by strike
         st.plotly_chart(chart_dex_by_strike(spot, data, strike_range), use_container_width=True)
         c1, c2, c3 = st.columns(3)
@@ -2045,7 +2410,7 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer):
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # TAB 5 — 3D VOL SURFACE (Three.js interactive)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    with tabs[4]:
+    with tabs[5]:
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             st.metric("IV Mean", f"{metrics['iv_mean']*100:.1f}%")
@@ -2069,7 +2434,7 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer):
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # TAB 6 — DATA (table + CSV download)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    with tabs[5]:
+    with tabs[6]:
         st.markdown("##### Options Data")
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -2190,9 +2555,25 @@ def show_landing():
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
+def apply_expiry_filter(data: pd.DataFrame, expiry_filter: str) -> pd.DataFrame:
+    """Apply expiry filter to options data"""
+    if expiry_filter == "All Expirations":
+        return data
+    today = pd.Timestamp.now().normalize()
+    if expiry_filter == "0DTE Only":
+        return data[data["expiration"].dt.normalize() == today]
+    elif expiry_filter == "≤ 7 DTE":
+        cutoff = today + timedelta(days=7)
+        return data[data["expiration"] <= cutoff]
+    elif expiry_filter == "≤ 30 DTE":
+        cutoff = today + timedelta(days=30)
+        return data[data["expiration"] <= cutoff]
+    return data
+
+
 def main():
     render_hero()
-    ticker, strike_range, max_exp_days, min_oi, dealer, analyze, compare_input = render_sidebar()
+    ticker, strike_range, max_exp_days, min_oi, dealer, analyze, compare_input, expiry_filter, price_days = render_sidebar()
 
     if analyze:
         progress = st.progress(0)
@@ -2225,7 +2606,16 @@ def main():
                         progress.empty()
                         status.empty()
 
-                        display_results(ticker, spot, odata, strike_range, max_exp_days, dealer)
+                        # Apply expiry filter
+                        filtered = apply_expiry_filter(odata, expiry_filter)
+                        if filtered.empty:
+                            st.warning(f"No options match '{expiry_filter}' filter. Showing all expirations.")
+                            filtered = odata
+
+                        if expiry_filter != "All Expirations":
+                            st.info(f"🔍 Showing: **{expiry_filter}** ({len(filtered):,} contracts)")
+
+                        display_results(ticker, spot, filtered, strike_range, max_exp_days, dealer, price_days)
 
                         # Multi-ticker compare
                         if compare_input and compare_input.strip():
@@ -2254,7 +2644,6 @@ def main():
                                             })
 
                             if compare_data:
-                                # Add main ticker
                                 main_metrics = compute_all_metrics(
                                     calculate_gex(spot, odata, dealer), spot)
                                 main_mp, _, _, _, _, _ = calculate_max_pain(odata, spot)
@@ -2298,8 +2687,13 @@ def main():
 
     elif st.session_state.data_loaded:
         td = st.session_state.ticker_data
-        display_results(td["ticker"], td["spot"], td["data"], strike_range, max_exp_days,
-                       td.get("dealer", "standard"))
+        filtered = apply_expiry_filter(td["data"], expiry_filter)
+        if filtered.empty:
+            filtered = td["data"]
+        if expiry_filter != "All Expirations":
+            st.info(f"🔍 Showing: **{expiry_filter}** ({len(filtered):,} contracts)")
+        display_results(td["ticker"], td["spot"], filtered, strike_range, max_exp_days,
+                       td.get("dealer", "standard"), price_days)
     else:
         show_landing()
 
