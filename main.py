@@ -959,22 +959,43 @@ def chart_price_with_levels(price_df: pd.DataFrame, spot: float, max_pain: float
     last_date = price_df["date"].iloc[-1]
     first_date = price_df["date"].iloc[0]
 
-    # ── Level Lines ──
+    # ── Y-axis range: based on price action + EM bands, NOT outlier levels ──
+    em = expected_move
+    price_lo = min(price_df["low"].min(), em["lower_2s"])
+    price_hi = max(price_df["high"].max(), em["upper_2s"])
+    pad = (price_hi - price_lo) * 0.08
+    y_lo = price_lo - pad
+    y_hi = price_hi + pad
+
+    def in_range(price):
+        return y_lo <= price <= y_hi
+
+    # ── Level Lines (only if within visible range) ──
     def add_level(price, color, name, dash="dash", width=1.5):
-        fig.add_hline(y=price, line_dash=dash, line_color=color, line_width=width, opacity=0.7)
-        fig.add_annotation(
-            x=last_date, y=price, text=f" {name}: ${price:.2f}",
-            showarrow=False, xanchor="left", font=dict(size=10, color=color),
-            bgcolor="rgba(6,9,15,0.8)", bordercolor=color, borderwidth=1,
-            borderpad=3,
-        )
+        if in_range(price):
+            fig.add_hline(y=price, line_dash=dash, line_color=color, line_width=width, opacity=0.7)
+            fig.add_annotation(
+                x=last_date, y=price, text=f" {name}: ${price:.2f}",
+                showarrow=False, xanchor="left", font=dict(size=10, color=color),
+                bgcolor="rgba(6,9,15,0.8)", bordercolor=color, borderwidth=1, borderpad=3,
+            )
+        else:
+            # Off-screen: show at edge with arrow
+            edge_y = y_hi - pad * 0.3 if price > y_hi else y_lo + pad * 0.3
+            arrow = "↑" if price > y_hi else "↓"
+            dist_pct = (price - spot) / spot * 100
+            fig.add_annotation(
+                x=last_date, y=edge_y,
+                text=f" {arrow} {name}: ${price:.2f} ({dist_pct:+.1f}%)",
+                showarrow=False, xanchor="left", font=dict(size=10, color=color),
+                bgcolor="rgba(6,9,15,0.85)", bordercolor=color, borderwidth=1, borderpad=3,
+            )
 
     add_level(max_pain, "#00FF88", "Max Pain", "dash", 2)
     add_level(gamma_flip, "#FE53BB", "γ Flip", "dash", 2)
     add_level(metrics["max_gex_strike"], "#00D9FF", "Max GEX", "dot", 1.5)
 
     # ── Expected Move Cone ──
-    em = expected_move
     for sigma, opacity, label in [(1, 0.12, "±1σ"), (2, 0.06, "±2σ")]:
         upper = em[f"upper_{sigma}s"]
         lower = em[f"lower_{sigma}s"]
@@ -992,8 +1013,8 @@ def chart_price_with_levels(price_df: pd.DataFrame, spot: float, max_pain: float
             xanchor="left", font=dict(size=9, color="rgba(0,217,255,0.53)"),
         )
 
-    # ── Call/Put Walls ──
-    if walls["biggest_call"]:
+    # ── Call/Put Walls (only if visible) ──
+    if walls["biggest_call"] and in_range(walls["biggest_call"]["strike"]):
         cw = walls["biggest_call"]["strike"]
         fig.add_hline(y=cw, line_dash="dot", line_color="rgba(0,255,136,0.53)", line_width=1)
         fig.add_annotation(
@@ -1002,7 +1023,7 @@ def chart_price_with_levels(price_df: pd.DataFrame, spot: float, max_pain: float
             font=dict(size=9, color="#00FF88"), bgcolor="rgba(0,255,136,0.08)",
         )
 
-    if walls["biggest_put"]:
+    if walls["biggest_put"] and in_range(walls["biggest_put"]["strike"]):
         pw = walls["biggest_put"]["strike"]
         fig.add_hline(y=pw, line_dash="dot", line_color="rgba(255,68,102,0.53)", line_width=1)
         fig.add_annotation(
@@ -1015,7 +1036,7 @@ def chart_price_with_levels(price_df: pd.DataFrame, spot: float, max_pain: float
         title=dict(text=f"{ticker} — Price + GEX Levels", font=dict(size=18)),
         height=520, showlegend=False,
         xaxis=dict(rangeslider=dict(visible=False), type="date"),
-        yaxis=dict(title="Price ($)", side="right"),
+        yaxis=dict(title="Price ($)", side="right", range=[y_lo, y_hi]),
         yaxis2=dict(overlaying="y", side="left", showgrid=False, showticklabels=False,
                     range=[0, price_df["volume"].max() * 4]),
     ))
@@ -1417,7 +1438,7 @@ def chart_cumulative_gex(data: pd.DataFrame) -> go.Figure:
 
 
 def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, metrics: dict):
-    """Render 3D Implied Volatility surface using Three.js"""
+    """Render 3D Implied Volatility surface using Three.js with labels and effects"""
     if "iv" not in data.columns or data["iv"].isna().all():
         st.warning("IV data not available for 3D surface.")
         return
@@ -1431,7 +1452,6 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
         st.warning("Not enough IV data to build 3D surface.")
         return
 
-    # Build IV grid: merge puts below ATM, calls above ATM for clean smile
     rows = []
     for exp in df["expiration"].unique():
         edf = df[df["expiration"] == exp]
@@ -1447,20 +1467,14 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
         return
 
     iv_df = pd.DataFrame(rows)
-
-    # Bin strikes and DTEs for a smooth grid
     n_strike_bins = min(40, iv_df["strike"].nunique())
     n_dte_bins = min(25, iv_df["dte"].nunique())
-
     strike_bins = np.linspace(iv_df["strike"].min(), iv_df["strike"].max(), n_strike_bins + 1)
     dte_max = min(iv_df["dte"].max(), 120)
     dte_bins = np.linspace(0, dte_max, n_dte_bins + 1)
-
     iv_df["s_bin"] = pd.cut(iv_df["strike"], bins=strike_bins, labels=strike_bins[:-1]).astype(float)
     iv_df["d_bin"] = pd.cut(iv_df["dte"], bins=dte_bins, labels=dte_bins[:-1]).astype(float)
-
     pivot = iv_df.pivot_table(values="iv", index="s_bin", columns="d_bin", aggfunc="mean")
-    # Forward/back fill to reduce holes
     pivot = pivot.interpolate(axis=0, limit=3).interpolate(axis=1, limit=3).bfill().ffill().fillna(0)
 
     strikes_list = [float(s) for s in pivot.index]
@@ -1473,11 +1487,35 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
         for di, dv in enumerate(dtes_list):
             grid.append({"s": sv, "d": dv, "iv": round(float(pivot.iloc[si, di]), 2)})
 
+    # Pick a few strike labels to show (5-7 ticks)
+    n_labels = min(7, nS)
+    label_indices = [int(i * (nS - 1) / (n_labels - 1)) for i in range(n_labels)] if n_labels > 1 else [0]
+    strike_labels = [{"idx": i, "val": round(strikes_list[i], 1)} for i in label_indices]
+
+    # Pick DTE labels
+    n_dte_labels = min(5, nD)
+    dte_label_indices = [int(i * (nD - 1) / (n_dte_labels - 1)) for i in range(n_dte_labels)] if n_dte_labels > 1 else [0]
+    dte_labels = [{"idx": i, "val": round(dtes_list[i])} for i in dte_label_indices]
+
+    # IV reference levels (in %)
+    iv_min_val = float(pivot.min().min())
+    iv_max_val = float(pivot.max().max())
+    iv_ref_levels = []
+    for pct in [10, 20, 30, 40, 50, 60, 80, 100]:
+        if iv_min_val - 2 <= pct <= iv_max_val + 5:
+            iv_ref_levels.append(pct)
+    if len(iv_ref_levels) > 4:
+        step = max(1, len(iv_ref_levels) // 4)
+        iv_ref_levels = iv_ref_levels[::step][:4]
+
     json_data = json.dumps({
         "grid": grid, "spot": spot, "nStrikes": nS, "nDtes": nD,
         "strikes": strikes_list, "dtes": dtes_list,
         "ivMean": round(metrics["iv_mean"] * 100, 1),
         "ivSkew": round(metrics["iv_skew"] * 100, 1),
+        "strikeLabels": strike_labels, "dteLabels": dte_labels,
+        "ivRefLevels": iv_ref_levels,
+        "ivMin": round(iv_min_val, 1), "ivMax": round(iv_max_val, 1),
     })
 
     html = f"""
@@ -1485,13 +1523,38 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
     <html>
     <head>
     <style>
-        body {{ margin:0; overflow:hidden; background:#06090F; font-family:'Outfit',sans-serif; }}
+        * {{ margin:0; padding:0; box-sizing:border-box; }}
+        body {{ overflow:hidden; background:#06090F; font-family:'JetBrains Mono','Fira Code',monospace; }}
         canvas {{ display:block; }}
+
+        /* ── Vignette + scanline overlay ── */
+        #fx-overlay {{
+            position:fixed; top:0; left:0; width:100%; height:100%;
+            pointer-events:none; z-index:10;
+            background: radial-gradient(ellipse at center, transparent 55%, rgba(6,9,15,0.5) 100%);
+        }}
+        #fx-overlay::after {{
+            content:'';position:absolute;top:0;left:0;width:100%;height:100%;
+            background:repeating-linear-gradient(
+                0deg, transparent, transparent 2px,
+                rgba(0,217,255,0.008) 2px, rgba(0,217,255,0.008) 4px
+            );
+            animation: scanShift 8s linear infinite;
+        }}
+        @keyframes scanShift {{ 0%{{transform:translateY(0)}} 100%{{transform:translateY(4px)}} }}
+
+        /* ── Bloom glow on canvas ── */
+        canvas {{
+            filter: contrast(1.05) saturate(1.1);
+        }}
+
+        /* ── HUD ── */
         #hud {{
             position:absolute; top:12px; left:16px; color:#7A8BA8; font-size:11px;
             background:rgba(6,9,15,0.88); padding:12px 18px; border-radius:12px;
-            border:1px solid rgba(0,217,255,0.1); backdrop-filter:blur(12px);
-            pointer-events:none; max-width:240px;
+            border:1px solid rgba(0,217,255,0.12); backdrop-filter:blur(16px);
+            pointer-events:none; max-width:240px; z-index:20;
+            box-shadow: 0 0 30px rgba(0,217,255,0.04), inset 0 0 30px rgba(0,217,255,0.02);
         }}
         #hud .title {{
             font-weight:800; font-size:16px; margin-bottom:6px; letter-spacing:-0.5px;
@@ -1501,66 +1564,98 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
         #hud .row {{ display:flex; justify-content:space-between; margin-top:4px; }}
         #hud .label {{ color:#4A5568; font-size:10px; text-transform:uppercase; letter-spacing:1px; }}
         #hud .val {{ color:#E8ECF4; font-weight:600; font-size:12px; }}
+
+        /* ── Legend ── */
         #legend {{
             position:absolute; bottom:12px; left:16px; color:#4A5568; font-size:10px;
-            background:rgba(6,9,15,0.8); padding:10px 14px; border-radius:8px;
-            border:1px solid rgba(0,217,255,0.06);
+            background:rgba(6,9,15,0.85); padding:10px 14px; border-radius:8px;
+            border:1px solid rgba(0,217,255,0.06); z-index:20;
+            box-shadow: 0 0 20px rgba(0,217,255,0.03);
         }}
         .grad-bar {{
             width:160px; height:8px; border-radius:4px; margin:6px 0 4px;
             background:linear-gradient(90deg, #003366, #0088cc, #00D9FF, #FFD700, #FF6633, #FF2200);
         }}
+
+        /* ── Controls ── */
         #controls {{
-            position:absolute; top:12px; right:16px; display:flex; gap:6px;
+            position:absolute; top:12px; right:16px; display:flex; gap:6px; z-index:20;
         }}
         #controls button {{
             background:rgba(11,17,32,0.85); border:1px solid rgba(0,217,255,0.15);
             color:#7A8BA8; padding:6px 14px; border-radius:16px; font-size:11px;
-            cursor:pointer; font-family:'Outfit',sans-serif; transition:all 0.2s;
+            cursor:pointer; font-family:'JetBrains Mono',monospace; transition:all 0.2s;
         }}
         #controls button:hover {{ border-color:rgba(0,217,255,0.4); color:#E8ECF4; }}
         #controls button.active {{ background:rgba(0,217,255,0.12); color:#00D9FF; border-color:rgba(0,217,255,0.3); }}
+
+        /* ── Axis info bar ── */
+        #axis-info {{
+            position:absolute; bottom:12px; right:16px; color:#4A5568; font-size:9px;
+            background:rgba(6,9,15,0.85); padding:8px 14px; border-radius:8px;
+            border:1px solid rgba(0,217,255,0.06); z-index:20;
+            line-height:1.8; letter-spacing:0.5px;
+        }}
+        #axis-info .ax {{ color:#00D9FF; font-weight:600; }}
+        #axis-info .ay {{ color:#FFD700; font-weight:600; }}
+        #axis-info .az {{ color:#FE53BB; font-weight:600; }}
+
+        /* ── Tooltip ── */
         #tooltip {{
-            position:absolute; display:none; background:rgba(6,9,15,0.92); color:#E8ECF4;
-            padding:8px 12px; border-radius:8px; font-size:11px; pointer-events:none;
-            border:1px solid rgba(0,217,255,0.2); backdrop-filter:blur(8px);
-            font-family:'JetBrains Mono',monospace;
+            position:absolute; display:none; background:rgba(6,9,15,0.94); color:#E8ECF4;
+            padding:8px 14px; border-radius:8px; font-size:11px; pointer-events:none;
+            border:1px solid rgba(0,217,255,0.2); backdrop-filter:blur(8px); z-index:30;
         }}
     </style>
     </head>
     <body>
+    <div id="fx-overlay"></div>
+
     <div id="hud">
         <div class="title">3D Volatility Surface</div>
         <div style="color:#4A5568; font-size:10px; margin-bottom:8px;">X: Strike · Z: DTE · Y: Implied Vol</div>
         <div class="row"><span class="label">Spot</span><span class="val" style="color:#FFD700;">${spot:.2f}</span></div>
         <div class="row"><span class="label">IV Mean</span><span class="val">{metrics['iv_mean']*100:.1f}%</span></div>
         <div class="row"><span class="label">IV Skew</span><span class="val" style="color:{'#FF4466' if metrics['iv_skew'] > 0 else '#00FF88'};">{metrics['iv_skew']*100:+.1f}%</span></div>
+        <div class="row"><span class="label">IV Range</span><span class="val" style="font-size:10px;">{iv_min_val:.0f}% — {iv_max_val:.0f}%</span></div>
     </div>
+
     <div id="legend">
         <div style="color:#7A8BA8; font-size:10px; font-weight:600; letter-spacing:1px;">IV SCALE</div>
         <div class="grad-bar"></div>
         <div style="display:flex; justify-content:space-between; font-size:9px;">
-            <span>Low IV</span><span>Mid</span><span>High IV</span>
+            <span>{iv_min_val:.0f}%</span><span>{(iv_min_val+iv_max_val)/2:.0f}%</span><span>{iv_max_val:.0f}%</span>
         </div>
-        <div style="margin-top:8px; line-height:1.6;">
+        <div style="margin-top:8px; line-height:1.8; font-size:9px;">
             <span style="color:#FFD700;">● Spot Price</span><br/>
-            <span style="color:rgba(255,255,255,0.3);">─ Grid Lines</span>
+            <span style="color:rgba(0,217,255,0.4);">─ IV Ref Planes</span><br/>
+            <span style="color:rgba(255,255,255,0.15);">─ Grid</span>
         </div>
     </div>
+
     <div id="controls">
         <button id="btnRotate" class="active" onclick="toggleRotate()">⟳ Rotate</button>
         <button onclick="resetCamera()">↺ Reset</button>
-        <button id="btnWire" onclick="toggleWire()">◻ Wireframe</button>
+        <button id="btnWire" onclick="toggleWire()">◻ Wire</button>
+        <button id="btnRefs" class="active" onclick="toggleRefs()">▧ Refs</button>
     </div>
+
+    <div id="axis-info">
+        <span class="ax">X →</span> Strike ($)<br/>
+        <span class="ay">Y ↑</span> Implied Vol (%)<br/>
+        <span class="az">Z →</span> Days to Expiry
+    </div>
+
     <div id="tooltip"></div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script>
     const D = {json_data};
-    let autoRotate = true, showWire = true;
+    let autoRotate = true, showWire = true, showRefs = true;
 
+    // ── Scene ──
     const scene = new THREE.Scene();
-    scene.fog = new THREE.FogExp2(0x06090F, 0.008);
+    scene.fog = new THREE.FogExp2(0x06090F, 0.006);
     const camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 200);
     const renderer = new THREE.WebGLRenderer({{ antialias:true, alpha:true }});
     renderer.setSize(window.innerWidth, window.innerHeight);
@@ -1569,20 +1664,47 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
     renderer.shadowMap.enabled = true;
     document.body.appendChild(renderer.domElement);
 
-    // Lights — cinematic setup
+    // ── Lights ──
     scene.add(new THREE.AmbientLight(0x223344, 0.5));
-    const dl = new THREE.DirectionalLight(0xffffff, 0.6);
+    const dl = new THREE.DirectionalLight(0xffffff, 0.7);
     dl.position.set(8, 20, 8); dl.castShadow = true; scene.add(dl);
-    const pl1 = new THREE.PointLight(0x00D9FF, 1.0, 50); pl1.position.set(-12, 10, -12); scene.add(pl1);
+    const pl1 = new THREE.PointLight(0x00D9FF, 1.2, 50); pl1.position.set(-12, 10, -12); scene.add(pl1);
     const pl2 = new THREE.PointLight(0xFE53BB, 0.8, 50); pl2.position.set(12, 10, 12); scene.add(pl2);
     const pl3 = new THREE.PointLight(0xFFD700, 0.4, 30); pl3.position.set(0, 15, 0); scene.add(pl3);
 
-    // Grid floor
+    // ── Grid floor with gradient ──
     const grid = new THREE.GridHelper(30, 30, 0x111825, 0x0B0F1A);
     grid.position.y = -0.05;
     scene.add(grid);
 
-    // Build surface
+    // ── Helper: Create text sprite ──
+    function makeTextSprite(text, opts = {{}}) {{
+        const fontSize = opts.fontSize || 48;
+        const color = opts.color || '#7A8BA8';
+        const bg = opts.bg || 'transparent';
+        const cv = document.createElement('canvas');
+        cv.width = 512; cv.height = 128;
+        const ctx = cv.getContext('2d');
+        ctx.clearRect(0, 0, cv.width, cv.height);
+        if (bg !== 'transparent') {{
+            ctx.fillStyle = bg;
+            ctx.roundRect(0, 0, cv.width, cv.height, 8);
+            ctx.fill();
+        }}
+        ctx.font = `${{fontSize}}px 'JetBrains Mono', monospace`;
+        ctx.fillStyle = color;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, cv.width/2, cv.height/2);
+        const tex = new THREE.CanvasTexture(cv);
+        tex.minFilter = THREE.LinearFilter;
+        const mat = new THREE.SpriteMaterial({{ map: tex, transparent: true, opacity: opts.opacity || 0.85, depthWrite: false }});
+        const sprite = new THREE.Sprite(mat);
+        sprite.scale.set(opts.scale || 2.5, (opts.scale || 2.5) * 0.25, 1);
+        return sprite;
+    }}
+
+    // ── Surface ──
     const nS = D.nStrikes, nD = D.nDtes;
     const W = 22, Dp = 16;
     const geo = new THREE.PlaneGeometry(W, Dp, nS-1, nD-1);
@@ -1593,16 +1715,18 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
     const maxIV = Math.max(...D.grid.map(p => p.iv), 1);
     const minIV = Math.min(...D.grid.filter(p => p.iv > 0).map(p => p.iv), 0);
     const ivRange = maxIV - minIV || 1;
+    const heightMult = 14;
+
+    function ivToY(iv) {{ return ((iv - minIV) / ivRange) * heightMult; }}
 
     for (let j = 0; j < nD; j++) {{
         for (let i = 0; i < nS; i++) {{
             const idx = j * nS + i;
             const iv = lookup[D.strikes[i] + ',' + D.dtes[j]] || 0;
-            const h = ((iv - minIV) / ivRange) * 14;
+            const h = ivToY(iv);
             const pi = idx * 3;
             geo.attributes.position.array[pi + 2] = h;
 
-            // Color: deep blue → cyan → gold → orange → red
             const t = (iv - minIV) / ivRange;
             let r, g, b;
             if (t < 0.25) {{
@@ -1635,47 +1759,158 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
     surfaceMesh.receiveShadow = true;
     scene.add(surfaceMesh);
 
-    // Wireframe overlay
+    // ── Wireframe ──
     const wireGeo = geo.clone();
     const wireMat = new THREE.MeshBasicMaterial({{ color:0xffffff, wireframe:true, transparent:true, opacity:0.06 }});
     const wireMesh = new THREE.Mesh(wireGeo, wireMat);
     wireMesh.rotation.x = -Math.PI / 2;
     scene.add(wireMesh);
 
-    // Spot price column — glowing vertical beam
+    // ── Spot price marker ──
     const spotI = D.strikes.findIndex(s => s >= D.spot);
-    const spotX = -W/2 + (spotI / Math.max(nS-1, 1)) * W;
+    const spotFrac = spotI / Math.max(nS-1, 1);
+    const spotX = -W/2 + spotFrac * W;
 
-    // Spot sphere
+    // Glowing sphere
     const ss = new THREE.SphereGeometry(0.22, 32, 32);
     const sm = new THREE.MeshBasicMaterial({{ color:0xFFD700, transparent:true, opacity:0.95 }});
     const sMesh = new THREE.Mesh(ss, sm);
     sMesh.position.set(spotX, 16, 0);
     scene.add(sMesh);
 
-    // Glow
-    const gs = new THREE.SphereGeometry(0.5, 32, 32);
-    const gm = new THREE.MeshBasicMaterial({{ color:0xFFD700, transparent:true, opacity:0.1 }});
+    const gs = new THREE.SphereGeometry(0.6, 32, 32);
+    const gm = new THREE.MeshBasicMaterial({{ color:0xFFD700, transparent:true, opacity:0.08 }});
     const gMesh = new THREE.Mesh(gs, gm);
     gMesh.position.set(spotX, 16, 0);
     scene.add(gMesh);
 
     // Beam
     const bg = new THREE.CylinderGeometry(0.012, 0.012, 20, 8);
-    const bm = new THREE.MeshBasicMaterial({{ color:0xFFD700, transparent:true, opacity:0.15 }});
+    const bm = new THREE.MeshBasicMaterial({{ color:0xFFD700, transparent:true, opacity:0.12 }});
     const bMesh = new THREE.Mesh(bg, bm);
     bMesh.position.set(spotX, 5, 0);
     scene.add(bMesh);
 
-    // Spot plane slice (vertical plane at spot strike)
-    const planeGeo = new THREE.PlaneGeometry(0.02, 20);
-    const planeMat = new THREE.MeshBasicMaterial({{ color:0xFFD700, transparent:true, opacity:0.04, side:THREE.DoubleSide }});
-    const planeMesh = new THREE.Mesh(planeGeo, planeMat);
-    planeMesh.position.set(spotX, 5, 0);
-    scene.add(planeMesh);
+    // Spot label
+    const spotLabel = makeTextSprite('SPOT $' + D.spot.toFixed(1), {{ color:'#FFD700', fontSize:42, scale:2.2, opacity:0.9 }});
+    spotLabel.position.set(spotX, 17.5, 0);
+    scene.add(spotLabel);
 
-    // Camera control
-    let theta = 0.8, phi = 0.85, radius = 20;
+    // ── ATM glow line on surface ──
+    // Trace the surface height at the spot strike index across all DTEs
+    const atmPts = [];
+    for (let j = 0; j < nD; j++) {{
+        const iv = lookup[D.strikes[Math.min(spotI, nS-1)] + ',' + D.dtes[j]] || 0;
+        const h = ivToY(iv);
+        const z = -Dp/2 + (j / Math.max(nD-1, 1)) * Dp;
+        atmPts.push(new THREE.Vector3(spotX, h + 0.05, z));
+    }}
+    if (atmPts.length > 1) {{
+        const atmCurve = new THREE.BufferGeometry().setFromPoints(atmPts);
+        const atmLine = new THREE.Line(atmCurve,
+            new THREE.LineBasicMaterial({{ color: 0xFFD700, transparent: true, opacity: 0.5, linewidth: 2 }}));
+        atmLine.rotation.x = -Math.PI / 2;
+        scene.add(atmLine);
+    }}
+
+    // ══════════════════════════════════════════════════
+    //  REFERENCE ELEMENTS GROUP (togglable)
+    // ══════════════════════════════════════════════════
+    const refGroup = new THREE.Group();
+
+    // ── Strike axis labels (along X, on the floor) ──
+    D.strikeLabels.forEach(sl => {{
+        const x = -W/2 + (sl.idx / Math.max(nS-1, 1)) * W;
+        // Tick mark
+        const tickGeo = new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(x, 0, Dp/2 + 0.3),
+            new THREE.Vector3(x, 0, Dp/2 + 0.8)
+        ]);
+        const tick = new THREE.Line(tickGeo, new THREE.LineBasicMaterial({{ color:0x00D9FF, transparent:true, opacity:0.25 }}));
+        refGroup.add(tick);
+
+        // Label
+        const lbl = makeTextSprite('$' + sl.val.toFixed(0), {{ color:'#00D9FF', fontSize:40, scale:1.8, opacity:0.65 }});
+        lbl.position.set(x, 0.1, Dp/2 + 1.5);
+        refGroup.add(lbl);
+    }});
+
+    // "STRIKE →" axis title
+    const strikeTitle = makeTextSprite('STRIKE →', {{ color:'#00D9FF', fontSize:36, scale:2.0, opacity:0.4 }});
+    strikeTitle.position.set(0, 0.1, Dp/2 + 3);
+    refGroup.add(strikeTitle);
+
+    // ── DTE axis labels (along Z) ──
+    D.dteLabels.forEach(dl => {{
+        const z = -Dp/2 + (dl.idx / Math.max(nD-1, 1)) * Dp;
+        // Tick
+        const tickGeo = new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(-W/2 - 0.3, 0, z),
+            new THREE.Vector3(-W/2 - 0.8, 0, z)
+        ]);
+        const tick = new THREE.Line(tickGeo, new THREE.LineBasicMaterial({{ color:0xFE53BB, transparent:true, opacity:0.25 }}));
+        refGroup.add(tick);
+
+        const lbl = makeTextSprite(dl.val + 'd', {{ color:'#FE53BB', fontSize:40, scale:1.6, opacity:0.6 }});
+        lbl.position.set(-W/2 - 1.8, 0.1, z);
+        refGroup.add(lbl);
+    }});
+
+    // "DTE →" axis title
+    const dteTitle = makeTextSprite('← DTE', {{ color:'#FE53BB', fontSize:36, scale:2.0, opacity:0.4 }});
+    dteTitle.position.set(-W/2 - 1.8, 0.1, 0);
+    refGroup.add(dteTitle);
+
+    // ── IV reference planes (horizontal glass at key IV%) ──
+    D.ivRefLevels.forEach(ivPct => {{
+        const y = ivToY(ivPct);
+        // Semi-transparent plane
+        const plGeo = new THREE.PlaneGeometry(W + 2, Dp + 2);
+        const plMat = new THREE.MeshBasicMaterial({{
+            color: 0x00D9FF, transparent: true, opacity: 0.025,
+            side: THREE.DoubleSide, depthWrite: false
+        }});
+        const pl = new THREE.Mesh(plGeo, plMat);
+        pl.rotation.x = -Math.PI / 2;
+        pl.position.y = y;
+        refGroup.add(pl);
+
+        // Edge wireframe ring
+        const edgeGeo = new THREE.EdgesGeometry(plGeo);
+        const edgeMat = new THREE.LineBasicMaterial({{ color: 0x00D9FF, transparent: true, opacity: 0.08 }});
+        const edge = new THREE.LineSegments(edgeGeo, edgeMat);
+        edge.rotation.x = -Math.PI / 2;
+        edge.position.y = y;
+        refGroup.add(edge);
+
+        // IV% label on the left side
+        const ivLbl = makeTextSprite(ivPct + '%', {{ color:'#00D9FF', fontSize:44, scale:1.5, opacity:0.5 }});
+        ivLbl.position.set(-W/2 - 2.5, y, -Dp/2);
+        refGroup.add(ivLbl);
+
+        // Right side too
+        const ivLblR = makeTextSprite(ivPct + '%', {{ color:'#00D9FF', fontSize:38, scale:1.2, opacity:0.3 }});
+        ivLblR.position.set(W/2 + 2, y, Dp/2);
+        refGroup.add(ivLblR);
+    }});
+
+    // "IV %" vertical axis label
+    const ivTitle = makeTextSprite('IV% ↑', {{ color:'#FFD700', fontSize:36, scale:1.8, opacity:0.4 }});
+    ivTitle.position.set(-W/2 - 2.5, heightMult * 0.7, -Dp/2 - 1);
+    refGroup.add(ivTitle);
+
+    // ── Floor corner labels ──
+    const cornerFL = makeTextSprite('Near DTE / Low Strike', {{ color:'#4A5568', fontSize:28, scale:2.5, opacity:0.3 }});
+    cornerFL.position.set(-W/2, 0.1, -Dp/2 - 1.5);
+    refGroup.add(cornerFL);
+    const cornerBR = makeTextSprite('Far DTE / High Strike', {{ color:'#4A5568', fontSize:28, scale:2.5, opacity:0.3 }});
+    cornerBR.position.set(W/2, 0.1, Dp/2 + 1.5);
+    refGroup.add(cornerBR);
+
+    scene.add(refGroup);
+
+    // ── Camera ──
+    let theta = 0.8, phi = 0.75, radius = 22;
     let mouseDown = false, lastX = 0, lastY = 0;
 
     renderer.domElement.addEventListener('mousedown', e => {{ mouseDown=true; lastX=e.clientX; lastY=e.clientY; }});
@@ -1707,11 +1942,16 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
         autoRotate = !autoRotate;
         document.getElementById('btnRotate').classList.toggle('active', autoRotate);
     }}
-    function resetCamera() {{ theta=0.8; phi=0.85; radius=20; }}
+    function resetCamera() {{ theta=0.8; phi=0.75; radius=22; }}
     function toggleWire() {{
         showWire = !showWire;
         wireMesh.visible = showWire;
         document.getElementById('btnWire').classList.toggle('active', showWire);
+    }}
+    function toggleRefs() {{
+        showRefs = !showRefs;
+        refGroup.visible = showRefs;
+        document.getElementById('btnRefs').classList.toggle('active', showRefs);
     }}
 
     let t = 0;
@@ -1725,14 +1965,14 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
             Math.max(2, radius * Math.cos(phi)),
             radius * Math.sin(phi) * Math.sin(theta)
         );
-        camera.lookAt(0, 4, 0);
+        camera.lookAt(0, heightMult * 0.3, 0);
 
         // Pulse spot
         sMesh.position.y = 16 + Math.sin(t * 2) * 0.15;
         gMesh.position.y = sMesh.position.y;
         gMesh.scale.setScalar(1 + Math.sin(t * 2.5) * 0.15);
 
-        // Subtle light movement
+        // Subtle light sway
         pl1.position.x = -12 + Math.sin(t * 0.5) * 3;
         pl2.position.z = 12 + Math.cos(t * 0.4) * 3;
 
@@ -1749,7 +1989,7 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
     </body>
     </html>
     """
-    components.html(html, height=600, scrolling=False)
+    components.html(html, height=650, scrolling=False)
 
 
 def chart_vanna_charm(data: pd.DataFrame, spot: float, strike_range: float) -> go.Figure:
