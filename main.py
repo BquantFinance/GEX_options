@@ -609,24 +609,88 @@ def calculate_gamma_profile(data: pd.DataFrame, spot: float, dealer: str = "stan
     }
 
 
-def calculate_max_pain(data: pd.DataFrame, spot: float) -> tuple:
-    """Vectorized max pain calculation"""
-    strikes = np.sort(data["strike"].unique())
-    calls = data[data["type"] == "C"][["strike", "open_interest"]].values
-    puts = data[data["type"] == "P"][["strike", "open_interest"]].values
-
+def calculate_max_pain(data: pd.DataFrame, spot: float, target_expiry=None) -> tuple:
+    """
+    Max Pain calculated PER EXPIRATION (Barchart methodology).
+    
+    Key: Max pain only uses options from ONE expiration date, because only
+    those options expire/get exercised on that date. Mixing expirations
+    produces incorrect results.
+    
+    Args:
+        data: Options DataFrame with 'type', 'strike', 'open_interest', 'expiration'
+        spot: Current spot price
+        target_expiry: Specific expiration to calculate for. If None, uses nearest.
+    
+    Returns:
+        (max_pain_strike, pain_by_strike, min_pain_value, selected_expiry)
+    """
+    # If no target expiry, use the nearest expiration
+    if target_expiry is None:
+        available_expiries = sorted(data["expiration"].unique())
+        if not available_expiries:
+            return spot, {}, 0, None, {}, {}
+        target_expiry = available_expiries[0]  # nearest expiration
+    
+    # Filter to ONLY this expiration date
+    exp_data = data[data["expiration"] == target_expiry]
+    if exp_data.empty:
+        return spot, {}, 0, target_expiry, {}, {}
+    
+    strikes = np.sort(exp_data["strike"].unique())
+    
+    # Aggregate OI per strike per type (in case of duplicates)
+    call_oi = exp_data[exp_data["type"] == "C"].groupby("strike")["open_interest"].sum()
+    put_oi = exp_data[exp_data["type"] == "P"].groupby("strike")["open_interest"].sum()
+    
     pain = {}
+    call_pain_curve = {}
+    put_pain_curve = {}
+    
     for exp_price in strikes:
-        c_mask = calls[:, 0] < exp_price
-        c_pain = np.sum((exp_price - calls[c_mask, 0]) * calls[c_mask, 1] * CONTRACT_SIZE)
-        p_mask = puts[:, 0] > exp_price
-        p_pain = np.sum((puts[p_mask, 0] - exp_price) * puts[p_mask, 1] * CONTRACT_SIZE)
+        # Call holders' pain: calls ITM when strike < exp_price
+        # Pain = (exp_price - strike) × OI × 100
+        c_pain = 0.0
+        for c_strike, c_oi_val in call_oi.items():
+            if c_strike < exp_price:
+                c_pain += (exp_price - c_strike) * c_oi_val * CONTRACT_SIZE
+        
+        # Put holders' pain: puts ITM when strike > exp_price
+        # Pain = (strike - exp_price) × OI × 100
+        p_pain = 0.0
+        for p_strike, p_oi_val in put_oi.items():
+            if p_strike > exp_price:
+                p_pain += (p_strike - exp_price) * p_oi_val * CONTRACT_SIZE
+        
+        call_pain_curve[exp_price] = c_pain
+        put_pain_curve[exp_price] = p_pain
         pain[exp_price] = c_pain + p_pain
-
+    
     if pain:
         mp_strike = min(pain, key=pain.get)
-        return mp_strike, pain, pain[mp_strike]
-    return spot, {}, 0
+        return mp_strike, pain, pain[mp_strike], target_expiry, call_pain_curve, put_pain_curve
+    return spot, {}, 0, target_expiry, {}, {}
+
+
+def calculate_max_pain_term_structure(data: pd.DataFrame, spot: float, n_expiries: int = 8) -> list:
+    """
+    Calculate max pain for multiple upcoming expirations.
+    Returns a list of (expiry_date, max_pain_strike, days_to_expiry).
+    """
+    expiries = sorted(data["expiration"].unique())[:n_expiries]
+    term_structure = []
+    
+    for expiry in expiries:
+        mp_strike, _, _, _, _, _ = calculate_max_pain(data, spot, target_expiry=expiry)
+        dte = max(0, (expiry - pd.Timestamp.now()).days)
+        term_structure.append({
+            "expiry": expiry,
+            "max_pain": mp_strike,
+            "dte": dte,
+            "distance_pct": (mp_strike - spot) / spot * 100,
+        })
+    
+    return term_structure
 
 
 def calculate_pinning_probability(max_pain, spot, total_gex, days_to_exp, iv_mean=0.20):
@@ -828,8 +892,9 @@ def chart_gamma_by_expiry(profiles: dict, spot: float, ticker: str) -> go.Figure
     return fig
 
 
-def chart_max_pain(pain_by_strike: dict, max_pain: float, spot: float) -> go.Figure:
-    """Max pain curve with clean design"""
+def chart_max_pain(pain_by_strike: dict, max_pain: float, spot: float,
+                   call_pain: dict = None, put_pain: dict = None, expiry_label: str = "") -> go.Figure:
+    """Max pain curve with separate call/put pain (Barchart style)"""
     if not pain_by_strike:
         return go.Figure()
     strikes = sorted(pain_by_strike.keys())
@@ -843,12 +908,32 @@ def chart_max_pain(pain_by_strike: dict, max_pain: float, spot: float) -> go.Fig
     values = [pain_by_strike.get(s, 0) / 1e9 for s in strikes]
     fig = go.Figure()
 
+    # Separate call and put pain curves (Barchart style)
+    if call_pain and put_pain:
+        call_vals = [call_pain.get(s, 0) / 1e9 for s in strikes]
+        put_vals = [put_pain.get(s, 0) / 1e9 for s in strikes]
+
+        fig.add_trace(go.Scatter(
+            x=strikes, y=call_vals, mode="lines", fill="tozeroy",
+            line=dict(color=COLORS["cyan"], width=1.5),
+            fillcolor="rgba(0,217,255,0.12)",
+            name="Call Pain",
+            hovertemplate="Strike: $%{x:.1f}<br>Call Pain: $%{y:.2f}B<extra></extra>",
+        ))
+        fig.add_trace(go.Scatter(
+            x=strikes, y=put_vals, mode="lines", fill="tozeroy",
+            line=dict(color=COLORS["magenta"], width=1.5),
+            fillcolor="rgba(254,83,187,0.12)",
+            name="Put Pain",
+            hovertemplate="Strike: $%{x:.1f}<br>Put Pain: $%{y:.2f}B<extra></extra>",
+        ))
+
+    # Total pain curve on top
     fig.add_trace(go.Scatter(
-        x=strikes, y=values, mode="lines", fill="tozeroy",
-        line=dict(color=COLORS["red"], width=2),
-        fillcolor="rgba(255,68,102,0.1)",
-        name="Pain Curve",
-        hovertemplate="Strike: $%{x:.1f}<br>Pain: $%{y:.2f}B<extra></extra>",
+        x=strikes, y=values, mode="lines",
+        line=dict(color=COLORS["red"], width=2.5),
+        name="Total Pain",
+        hovertemplate="Strike: $%{x:.1f}<br>Total Pain: $%{y:.2f}B<extra></extra>",
     ))
 
     if max_pain in pain_by_strike:
@@ -867,11 +952,47 @@ def chart_max_pain(pain_by_strike: dict, max_pain: float, spot: float) -> go.Fig
 
     dist = (max_pain - spot) / spot * 100
     arrow = "↑" if dist > 0 else "↓"
+    title_suffix = f" — {expiry_label}" if expiry_label else ""
 
     fig.update_layout(**_base_layout(
-        title=dict(text=f"Max Pain ${max_pain:.2f}  |  Spot ${spot:.2f}  |  {arrow} {abs(dist):.2f}%",
+        title=dict(text=f"Max Pain ${max_pain:.2f}  |  Spot ${spot:.2f}  |  {arrow} {abs(dist):.2f}%{title_suffix}",
                    font=dict(size=18)),
-        xaxis_title="Strike ($)", yaxis_title="Total Pain ($Bn)", height=460, showlegend=False,
+        xaxis_title="Strike ($)", yaxis_title="Total Pain ($Bn)", height=460,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    ))
+    return fig
+
+
+def chart_max_pain_term_structure(term_structure: list, spot: float) -> go.Figure:
+    """Max pain across multiple expirations — term structure"""
+    if not term_structure:
+        return go.Figure()
+
+    dates = [ts["expiry"] for ts in term_structure]
+    mp_vals = [ts["max_pain"] for ts in term_structure]
+    dists = [ts["distance_pct"] for ts in term_structure]
+    colors = [COLORS["green"] if d >= 0 else COLORS["red"] for d in dists]
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=dates, y=mp_vals, mode="lines+markers",
+        line=dict(color=COLORS["cyan"], width=2),
+        marker=dict(size=10, color=colors, line=dict(width=2, color="#fff")),
+        name="Max Pain",
+        hovertemplate="%{x|%b %d}<br>Max Pain: $%{y:.2f}<extra></extra>",
+    ))
+
+    # Spot reference line
+    fig.add_hline(y=spot, line_dash="dash", line_color=COLORS["gold"], line_width=1.5,
+                  annotation_text=f"Spot ${spot:.2f}",
+                  annotation_font=dict(size=11, color=COLORS["gold"]))
+
+    fig.update_layout(**_base_layout(
+        title=dict(text="Max Pain Term Structure", font=dict(size=18)),
+        xaxis_title="Expiration", yaxis_title="Max Pain ($)",
+        height=350, showlegend=False,
+        xaxis=dict(tickformat="%b %d"),
     ))
     return fig
 
@@ -992,90 +1113,340 @@ def chart_cumulative_gex(data: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def chart_gamma_heatmap(data: pd.DataFrame, spot: float, strike_range: float) -> go.Figure:
-    """2D Heatmap: Strike × Expiry colored by GEX intensity"""
+def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, metrics: dict):
+    """Render 3D Implied Volatility surface using Three.js"""
+    if "iv" not in data.columns or data["iv"].isna().all():
+        st.warning("IV data not available for 3D surface.")
+        return
+
     lo, hi = spot * (1 - strike_range / 100), spot * (1 + strike_range / 100)
     df = data[(data["strike"] >= lo) & (data["strike"] <= hi)].copy()
+    df["dte"] = (df["expiration"] - pd.Timestamp.now()).dt.days
+    df = df[(df["dte"] >= 0) & (df["iv"].notna()) & (df["iv"] > 0)]
 
-    # Round strikes to reduce resolution for readability
-    n_unique = df["strike"].nunique()
-    if n_unique > 50:
-        # Bin strikes
-        bins = np.linspace(lo, hi, 50)
-        df["strike_bin"] = pd.cut(df["strike"], bins=bins, labels=bins[:-1]).astype(float)
-    else:
-        df["strike_bin"] = df["strike"]
+    if df.empty:
+        st.warning("Not enough IV data to build 3D surface.")
+        return
 
-    pivot = df.pivot_table(values="GEX", index="strike_bin", columns="expiration", aggfunc="sum", fill_value=0) / 1e6
+    # Build IV grid: merge puts below ATM, calls above ATM for clean smile
+    rows = []
+    for exp in df["expiration"].unique():
+        edf = df[df["expiration"] == exp]
+        dte = int(edf["dte"].iloc[0])
+        puts = edf[(edf["type"] == "P") & (edf["strike"] <= spot)].sort_values("strike")
+        calls = edf[(edf["type"] == "C") & (edf["strike"] > spot)].sort_values("strike")
+        merged = pd.concat([puts, calls])
+        for _, r in merged.iterrows():
+            rows.append({"strike": float(r["strike"]), "dte": dte, "iv": float(r["iv"]) * 100})
 
-    # Limit expiration columns
-    if pivot.shape[1] > 20:
-        pivot = pivot.iloc[:, :20]
+    if not rows:
+        st.warning("Not enough IV data.")
+        return
 
-    fig = go.Figure(data=go.Heatmap(
-        z=pivot.values,
-        x=[d.strftime("%b %d") for d in pivot.columns],
-        y=[f"${s:.0f}" for s in pivot.index],
-        colorscale=[
-            [0.0, "#1a0033"],
-            [0.25, "#4400aa"],
-            [0.45, "#FE53BB"],
-            [0.55, "#222"],
-            [0.65, "#006688"],
-            [0.75, "#00aacc"],
-            [1.0, "#00D9FF"],
-        ],
-        zmid=0,
-        colorbar=dict(title=dict(text="GEX ($M)", font=dict(size=11, color="#7A8BA8"))),
-        hovertemplate="Strike: %{y}<br>Expiry: %{x}<br>GEX: $%{z:.1f}M<extra></extra>",
-    ))
+    iv_df = pd.DataFrame(rows)
 
-    fig.update_layout(**_base_layout(
-        title=dict(text="Gamma Heatmap — Strike × Expiry", font=dict(size=18)),
-        xaxis_title="Expiration", yaxis_title="Strike", height=550,
-        yaxis=dict(autorange=True),
-    ))
-    return fig
+    # Bin strikes and DTEs for a smooth grid
+    n_strike_bins = min(40, iv_df["strike"].nunique())
+    n_dte_bins = min(25, iv_df["dte"].nunique())
 
+    strike_bins = np.linspace(iv_df["strike"].min(), iv_df["strike"].max(), n_strike_bins + 1)
+    dte_max = min(iv_df["dte"].max(), 120)
+    dte_bins = np.linspace(0, dte_max, n_dte_bins + 1)
 
-def chart_iv_smile(data: pd.DataFrame, spot: float) -> go.Figure:
-    """IV smile for nearest expirations"""
-    if "iv" not in data.columns or data["iv"].isna().all():
-        fig = go.Figure()
-        fig.update_layout(**_base_layout(title="IV data not available", height=400))
-        return fig
+    iv_df["s_bin"] = pd.cut(iv_df["strike"], bins=strike_bins, labels=strike_bins[:-1]).astype(float)
+    iv_df["d_bin"] = pd.cut(iv_df["dte"], bins=dte_bins, labels=dte_bins[:-1]).astype(float)
 
-    expiries = sorted(data["expiration"].unique())[:4]
-    exp_colors = [COLORS["cyan"], COLORS["magenta"], COLORS["green"], COLORS["gold"]]
+    pivot = iv_df.pivot_table(values="iv", index="s_bin", columns="d_bin", aggfunc="mean")
+    # Forward/back fill to reduce holes
+    pivot = pivot.interpolate(axis=0, limit=3).interpolate(axis=1, limit=3).bfill().ffill().fillna(0)
 
-    fig = go.Figure()
-    for i, exp in enumerate(expiries):
-        edf = data[data["expiration"] == exp].sort_values("strike")
-        calls = edf[edf["type"] == "C"]
-        puts = edf[edf["type"] == "P"]
+    strikes_list = [float(s) for s in pivot.index]
+    dtes_list = [float(d) for d in pivot.columns]
+    nS = len(strikes_list)
+    nD = len(dtes_list)
 
-        # Merge IV from puts (below spot) and calls (above spot)
-        merged = pd.concat([
-            puts[puts["strike"] <= spot][["strike", "iv"]],
-            calls[calls["strike"] > spot][["strike", "iv"]],
-        ]).sort_values("strike").dropna(subset=["iv"])
+    grid = []
+    for si, sv in enumerate(strikes_list):
+        for di, dv in enumerate(dtes_list):
+            grid.append({"s": sv, "d": dv, "iv": round(float(pivot.iloc[si, di]), 2)})
 
-        if merged.empty:
-            continue
+    json_data = json.dumps({
+        "grid": grid, "spot": spot, "nStrikes": nS, "nDtes": nD,
+        "strikes": strikes_list, "dtes": dtes_list,
+        "ivMean": round(metrics["iv_mean"] * 100, 1),
+        "ivSkew": round(metrics["iv_skew"] * 100, 1),
+    })
 
-        fig.add_trace(go.Scatter(
-            x=merged["strike"], y=merged["iv"] * 100,
-            mode="lines+markers", name=f"{exp.strftime('%d %b')}",
-            line=dict(color=exp_colors[i % len(exp_colors)], width=2),
-            marker=dict(size=4),
-        ))
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <style>
+        body {{ margin:0; overflow:hidden; background:#06090F; font-family:'Outfit',sans-serif; }}
+        canvas {{ display:block; }}
+        #hud {{
+            position:absolute; top:12px; left:16px; color:#7A8BA8; font-size:11px;
+            background:rgba(6,9,15,0.88); padding:12px 18px; border-radius:12px;
+            border:1px solid rgba(0,217,255,0.1); backdrop-filter:blur(12px);
+            pointer-events:none; max-width:240px;
+        }}
+        #hud .title {{
+            font-weight:800; font-size:16px; margin-bottom:6px; letter-spacing:-0.5px;
+            background:linear-gradient(90deg,#00D9FF,#FE53BB);
+            -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+        }}
+        #hud .row {{ display:flex; justify-content:space-between; margin-top:4px; }}
+        #hud .label {{ color:#4A5568; font-size:10px; text-transform:uppercase; letter-spacing:1px; }}
+        #hud .val {{ color:#E8ECF4; font-weight:600; font-size:12px; }}
+        #legend {{
+            position:absolute; bottom:12px; left:16px; color:#4A5568; font-size:10px;
+            background:rgba(6,9,15,0.8); padding:10px 14px; border-radius:8px;
+            border:1px solid rgba(0,217,255,0.06);
+        }}
+        .grad-bar {{
+            width:160px; height:8px; border-radius:4px; margin:6px 0 4px;
+            background:linear-gradient(90deg, #003366, #0088cc, #00D9FF, #FFD700, #FF6633, #FF2200);
+        }}
+        #controls {{
+            position:absolute; top:12px; right:16px; display:flex; gap:6px;
+        }}
+        #controls button {{
+            background:rgba(11,17,32,0.85); border:1px solid rgba(0,217,255,0.15);
+            color:#7A8BA8; padding:6px 14px; border-radius:16px; font-size:11px;
+            cursor:pointer; font-family:'Outfit',sans-serif; transition:all 0.2s;
+        }}
+        #controls button:hover {{ border-color:rgba(0,217,255,0.4); color:#E8ECF4; }}
+        #controls button.active {{ background:rgba(0,217,255,0.12); color:#00D9FF; border-color:rgba(0,217,255,0.3); }}
+        #tooltip {{
+            position:absolute; display:none; background:rgba(6,9,15,0.92); color:#E8ECF4;
+            padding:8px 12px; border-radius:8px; font-size:11px; pointer-events:none;
+            border:1px solid rgba(0,217,255,0.2); backdrop-filter:blur(8px);
+            font-family:'JetBrains Mono',monospace;
+        }}
+    </style>
+    </head>
+    <body>
+    <div id="hud">
+        <div class="title">3D Volatility Surface</div>
+        <div style="color:#4A5568; font-size:10px; margin-bottom:8px;">X: Strike · Z: DTE · Y: Implied Vol</div>
+        <div class="row"><span class="label">Spot</span><span class="val" style="color:#FFD700;">${spot:.2f}</span></div>
+        <div class="row"><span class="label">IV Mean</span><span class="val">{metrics['iv_mean']*100:.1f}%</span></div>
+        <div class="row"><span class="label">IV Skew</span><span class="val" style="color:{'#FF4466' if metrics['iv_skew'] > 0 else '#00FF88'};">{metrics['iv_skew']*100:+.1f}%</span></div>
+    </div>
+    <div id="legend">
+        <div style="color:#7A8BA8; font-size:10px; font-weight:600; letter-spacing:1px;">IV SCALE</div>
+        <div class="grad-bar"></div>
+        <div style="display:flex; justify-content:space-between; font-size:9px;">
+            <span>Low IV</span><span>Mid</span><span>High IV</span>
+        </div>
+        <div style="margin-top:8px; line-height:1.6;">
+            <span style="color:#FFD700;">● Spot Price</span><br/>
+            <span style="color:rgba(255,255,255,0.3);">─ Grid Lines</span>
+        </div>
+    </div>
+    <div id="controls">
+        <button id="btnRotate" class="active" onclick="toggleRotate()">⟳ Rotate</button>
+        <button onclick="resetCamera()">↺ Reset</button>
+        <button id="btnWire" onclick="toggleWire()">◻ Wireframe</button>
+    </div>
+    <div id="tooltip"></div>
 
-    fig.add_vline(x=spot, line_dash="dash", line_color=COLORS["gold"], line_width=1.5)
-    fig.update_layout(**_base_layout(
-        title=dict(text="Implied Volatility Smile", font=dict(size=18)),
-        xaxis_title="Strike", yaxis_title="IV (%)", height=450,
-    ))
-    return fig
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+    const D = {json_data};
+    let autoRotate = true, showWire = true;
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x06090F, 0.012);
+    const camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 200);
+    const renderer = new THREE.WebGLRenderer({{ antialias:true, alpha:true }});
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x06090F);
+    renderer.shadowMap.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    // Lights — cinematic setup
+    scene.add(new THREE.AmbientLight(0x223344, 0.5));
+    const dl = new THREE.DirectionalLight(0xffffff, 0.6);
+    dl.position.set(8, 20, 8); dl.castShadow = true; scene.add(dl);
+    const pl1 = new THREE.PointLight(0x00D9FF, 1.0, 50); pl1.position.set(-12, 10, -12); scene.add(pl1);
+    const pl2 = new THREE.PointLight(0xFE53BB, 0.8, 50); pl2.position.set(12, 10, 12); scene.add(pl2);
+    const pl3 = new THREE.PointLight(0xFFD700, 0.4, 30); pl3.position.set(0, 15, 0); scene.add(pl3);
+
+    // Grid floor
+    const grid = new THREE.GridHelper(30, 30, 0x111825, 0x0B0F1A);
+    grid.position.y = -0.05;
+    scene.add(grid);
+
+    // Build surface
+    const nS = D.nStrikes, nD = D.nDtes;
+    const W = 22, Dp = 16;
+    const geo = new THREE.PlaneGeometry(W, Dp, nS-1, nD-1);
+    const colors = new Float32Array(geo.attributes.position.count * 3);
+
+    const lookup = {{}};
+    D.grid.forEach(p => {{ lookup[p.s + ',' + p.d] = p.iv; }});
+    const maxIV = Math.max(...D.grid.map(p => p.iv), 1);
+    const minIV = Math.min(...D.grid.filter(p => p.iv > 0).map(p => p.iv), 0);
+    const ivRange = maxIV - minIV || 1;
+
+    for (let j = 0; j < nD; j++) {{
+        for (let i = 0; i < nS; i++) {{
+            const idx = j * nS + i;
+            const iv = lookup[D.strikes[i] + ',' + D.dtes[j]] || 0;
+            const h = ((iv - minIV) / ivRange) * 7;
+            const pi = idx * 3;
+            geo.attributes.position.array[pi + 2] = -h;
+
+            // Color: deep blue → cyan → gold → orange → red
+            const t = (iv - minIV) / ivRange;
+            let r, g, b;
+            if (t < 0.25) {{
+                const s = t / 0.25;
+                r = 0; g = 0.2 + s * 0.3; b = 0.4 + s * 0.6;
+            }} else if (t < 0.5) {{
+                const s = (t - 0.25) / 0.25;
+                r = 0; g = 0.5 + s * 0.35; b = 1.0 - s * 0.1;
+            }} else if (t < 0.75) {{
+                const s = (t - 0.5) / 0.25;
+                r = s * 1.0; g = 0.85 - s * 0.1; b = 0.9 - s * 0.7;
+            }} else {{
+                const s = (t - 0.75) / 0.25;
+                r = 1.0; g = 0.75 - s * 0.55; b = 0.2 - s * 0.15;
+            }}
+            colors[pi] = r; colors[pi+1] = g; colors[pi+2] = b;
+        }}
+    }}
+
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geo.computeVertexNormals();
+
+    const surfaceMat = new THREE.MeshPhongMaterial({{
+        vertexColors: true, side: THREE.DoubleSide,
+        shininess: 90, transparent: true, opacity: 0.93,
+        specular: 0x222233
+    }});
+    const surfaceMesh = new THREE.Mesh(geo, surfaceMat);
+    surfaceMesh.rotation.x = -Math.PI / 2;
+    surfaceMesh.receiveShadow = true;
+    scene.add(surfaceMesh);
+
+    // Wireframe overlay
+    const wireGeo = geo.clone();
+    const wireMat = new THREE.MeshBasicMaterial({{ color:0xffffff, wireframe:true, transparent:true, opacity:0.06 }});
+    const wireMesh = new THREE.Mesh(wireGeo, wireMat);
+    wireMesh.rotation.x = -Math.PI / 2;
+    scene.add(wireMesh);
+
+    // Spot price column — glowing vertical beam
+    const spotI = D.strikes.findIndex(s => s >= D.spot);
+    const spotX = -W/2 + (spotI / Math.max(nS-1, 1)) * W;
+
+    // Spot sphere
+    const ss = new THREE.SphereGeometry(0.22, 32, 32);
+    const sm = new THREE.MeshBasicMaterial({{ color:0xFFD700, transparent:true, opacity:0.95 }});
+    const sMesh = new THREE.Mesh(ss, sm);
+    sMesh.position.set(spotX, 5, 0);
+    scene.add(sMesh);
+
+    // Glow
+    const gs = new THREE.SphereGeometry(0.5, 32, 32);
+    const gm = new THREE.MeshBasicMaterial({{ color:0xFFD700, transparent:true, opacity:0.1 }});
+    const gMesh = new THREE.Mesh(gs, gm);
+    gMesh.position.set(spotX, 5, 0);
+    scene.add(gMesh);
+
+    // Beam
+    const bg = new THREE.CylinderGeometry(0.012, 0.012, 10, 8);
+    const bm = new THREE.MeshBasicMaterial({{ color:0xFFD700, transparent:true, opacity:0.15 }});
+    const bMesh = new THREE.Mesh(bg, bm);
+    bMesh.position.set(spotX, 0, 0);
+    scene.add(bMesh);
+
+    // Spot plane slice (vertical plane at spot strike)
+    const planeGeo = new THREE.PlaneGeometry(0.02, 10);
+    const planeMat = new THREE.MeshBasicMaterial({{ color:0xFFD700, transparent:true, opacity:0.04, side:THREE.DoubleSide }});
+    const planeMesh = new THREE.Mesh(planeGeo, planeMat);
+    planeMesh.position.set(spotX, 3, 0);
+    scene.add(planeMesh);
+
+    // Camera control
+    let theta = 0.6, phi = 0.5, radius = 24;
+    let mouseDown = false, lastX = 0, lastY = 0;
+
+    renderer.domElement.addEventListener('mousedown', e => {{ mouseDown=true; lastX=e.clientX; lastY=e.clientY; }});
+    renderer.domElement.addEventListener('mousemove', e => {{
+        if (!mouseDown) return;
+        theta -= (e.clientX - lastX) * 0.005;
+        phi = Math.max(0.12, Math.min(1.45, phi + (e.clientY - lastY) * 0.005));
+        lastX = e.clientX; lastY = e.clientY;
+    }});
+    renderer.domElement.addEventListener('mouseup', () => mouseDown=false);
+    renderer.domElement.addEventListener('mouseleave', () => mouseDown=false);
+    renderer.domElement.addEventListener('wheel', e => {{
+        radius = Math.max(8, Math.min(45, radius + e.deltaY * 0.015));
+    }});
+
+    // Touch
+    renderer.domElement.addEventListener('touchstart', e => {{
+        if (e.touches.length === 1) {{ mouseDown=true; lastX=e.touches[0].clientX; lastY=e.touches[0].clientY; }}
+    }});
+    renderer.domElement.addEventListener('touchmove', e => {{
+        if (!mouseDown || e.touches.length !== 1) return;
+        theta -= (e.touches[0].clientX - lastX) * 0.005;
+        phi = Math.max(0.12, Math.min(1.45, phi + (e.touches[0].clientY - lastY) * 0.005));
+        lastX = e.touches[0].clientX; lastY = e.touches[0].clientY;
+    }});
+    renderer.domElement.addEventListener('touchend', () => mouseDown=false);
+
+    function toggleRotate() {{
+        autoRotate = !autoRotate;
+        document.getElementById('btnRotate').classList.toggle('active', autoRotate);
+    }}
+    function resetCamera() {{ theta=0.6; phi=0.5; radius=24; }}
+    function toggleWire() {{
+        showWire = !showWire;
+        wireMesh.visible = showWire;
+        document.getElementById('btnWire').classList.toggle('active', showWire);
+    }}
+
+    let t = 0;
+    function animate() {{
+        requestAnimationFrame(animate);
+        t += 0.008;
+        if (autoRotate) theta += 0.0012;
+
+        camera.position.set(
+            radius * Math.sin(phi) * Math.cos(theta),
+            Math.max(2, radius * Math.cos(phi)),
+            radius * Math.sin(phi) * Math.sin(theta)
+        );
+        camera.lookAt(0, 2, 0);
+
+        // Pulse spot
+        sMesh.position.y = 5 + Math.sin(t * 2) * 0.12;
+        gMesh.position.y = sMesh.position.y;
+        gMesh.scale.setScalar(1 + Math.sin(t * 2.5) * 0.15);
+
+        // Subtle light movement
+        pl1.position.x = -12 + Math.sin(t * 0.5) * 3;
+        pl2.position.z = 12 + Math.cos(t * 0.4) * 3;
+
+        renderer.render(scene, camera);
+    }}
+    animate();
+
+    window.addEventListener('resize', () => {{
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }});
+    </script>
+    </body>
+    </html>
+    """
+    components.html(html, height=600, scrolling=False)
 
 
 def chart_vanna_charm(data: pd.DataFrame, spot: float, strike_range: float) -> go.Figure:
@@ -1113,264 +1484,6 @@ def chart_vanna_charm(data: pd.DataFrame, spot: float, strike_range: float) -> g
 # ═══════════════════════════════════════════════════════════════════════════════
 # 3D VISUALIZATION — Embedded Three.js
 # ═══════════════════════════════════════════════════════════════════════════════
-def render_3d_terrain(data: pd.DataFrame, spot: float, strike_range: float):
-    """Render 3D gamma terrain using Three.js embedded in Streamlit"""
-    lo, hi = spot * (1 - strike_range / 100), spot * (1 + strike_range / 100)
-    df = data[(data["strike"] >= lo) & (data["strike"] <= hi)].copy()
-
-    # Build grid data
-    df["dte"] = (df["expiration"] - pd.Timestamp.now()).dt.days
-    df = df[df["dte"] >= 0]
-
-    # Aggregate by strike bin and DTE
-    strike_bins = np.linspace(lo, hi, 40)
-    df["s_bin"] = pd.cut(df["strike"], bins=strike_bins, labels=strike_bins[:-1]).astype(float)
-    dte_bins = np.arange(0, min(df["dte"].max() + 5, 95), 3)
-    if len(dte_bins) < 2:
-        dte_bins = np.arange(0, 30, 3)
-    df["d_bin"] = pd.cut(df["dte"], bins=dte_bins, labels=dte_bins[:-1]).astype(float)
-
-    pivot = df.pivot_table(values="GEX", index="s_bin", columns="d_bin", aggfunc="sum", fill_value=0) / 1e9
-
-    grid_data = []
-    for si, strike_val in enumerate(pivot.index):
-        for di, dte_val in enumerate(pivot.columns):
-            gex_val = float(pivot.iloc[si, di])
-            grid_data.append({"s": float(strike_val), "d": float(dte_val), "g": round(gex_val, 4)})
-
-    json_data = json.dumps({
-        "grid": grid_data,
-        "spot": spot,
-        "nStrikes": len(pivot.index),
-        "nDtes": len(pivot.columns),
-        "strikes": [float(s) for s in pivot.index],
-        "dtes": [float(d) for d in pivot.columns],
-    })
-
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-    <style>
-        body {{ margin:0; overflow:hidden; background:#06090F; font-family:'Outfit',sans-serif; }}
-        canvas {{ display:block; }}
-        #info {{
-            position:absolute; top:12px; left:16px; color:#7A8BA8; font-size:11px;
-            background:rgba(6,9,15,0.85); padding:10px 16px; border-radius:10px;
-            border:1px solid rgba(0,217,255,0.1); backdrop-filter:blur(10px);
-            pointer-events:none;
-        }}
-        #info .title {{ color:#E8ECF4; font-weight:700; font-size:14px; margin-bottom:4px;
-            background:linear-gradient(90deg,#00D9FF,#FE53BB);
-            -webkit-background-clip:text; -webkit-text-fill-color:transparent;
-        }}
-        #legend {{
-            position:absolute; bottom:12px; left:16px; color:#4A5568; font-size:10px;
-            background:rgba(6,9,15,0.8); padding:8px 14px; border-radius:8px;
-            border:1px solid rgba(0,217,255,0.06);
-        }}
-        #legend span {{ margin-right:12px; }}
-        #controls {{
-            position:absolute; top:12px; right:16px; display:flex; gap:6px;
-        }}
-        #controls button {{
-            background:rgba(11,17,32,0.8); border:1px solid rgba(0,217,255,0.15);
-            color:#7A8BA8; padding:6px 12px; border-radius:16px; font-size:11px;
-            cursor:pointer; font-family:'Outfit',sans-serif;
-        }}
-        #controls button:hover {{ border-color:rgba(0,217,255,0.4); color:#E8ECF4; }}
-        #controls button.active {{ background:rgba(0,217,255,0.12); color:#00D9FF; }}
-    </style>
-    </head>
-    <body>
-    <div id="info">
-        <div class="title">3D Gamma Terrain</div>
-        <div>X: Strike · Z: Days to Expiry · Y: GEX</div>
-        <div style="margin-top:4px;color:#FFD700;">Spot: ${spot:.2f}</div>
-    </div>
-    <div id="legend">
-        <span style="color:#00D9FF;">■ Positive GEX</span>
-        <span style="color:#FE53BB;">■ Negative GEX</span>
-        <span style="color:#FFD700;">● Spot</span>
-    </div>
-    <div id="controls">
-        <button id="btnRotate" class="active" onclick="toggleRotate()">⟳ Auto-Rotate</button>
-        <button onclick="resetCamera()">↺ Reset View</button>
-    </div>
-
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    <script>
-    const DATA = {json_data};
-    let autoRotate = true;
-
-    // Scene setup
-    const scene = new THREE.Scene();
-    scene.fog = new THREE.FogExp2(0x06090F, 0.015);
-    const camera = new THREE.PerspectiveCamera(55, window.innerWidth/window.innerHeight, 0.1, 200);
-    const renderer = new THREE.WebGLRenderer({{ antialias:true }});
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.setClearColor(0x06090F);
-    document.body.appendChild(renderer.domElement);
-
-    // Lights
-    scene.add(new THREE.AmbientLight(0x334466, 0.7));
-    const dl = new THREE.DirectionalLight(0xffffff, 0.7);
-    dl.position.set(10, 20, 10);
-    scene.add(dl);
-    const pl1 = new THREE.PointLight(0x00D9FF, 1.2, 40);
-    pl1.position.set(-10, 8, -10);
-    scene.add(pl1);
-    const pl2 = new THREE.PointLight(0xFE53BB, 1.2, 40);
-    pl2.position.set(10, 8, 10);
-    scene.add(pl2);
-
-    // Grid
-    const grid = new THREE.GridHelper(30, 30, 0x111825, 0x0D1220);
-    grid.position.y = -0.05;
-    scene.add(grid);
-
-    // Build terrain
-    const nS = DATA.nStrikes, nD = DATA.nDtes;
-    const W = 20, D = 14;
-    const geo = new THREE.PlaneGeometry(W, D, nS-1, nD-1);
-    const cols = new Float32Array(geo.attributes.position.count * 3);
-
-    // Build lookup
-    const lookup = {{}};
-    DATA.grid.forEach(p => {{ lookup[p.s + ',' + p.d] = p.g; }});
-    const maxG = Math.max(...DATA.grid.map(p => Math.abs(p.g)), 0.001);
-
-    for (let j = 0; j < nD; j++) {{
-        for (let i = 0; i < nS; i++) {{
-            const idx = j * nS + i;
-            const gex = lookup[DATA.strikes[i] + ',' + DATA.dtes[j]] || 0;
-            const h = (gex / maxG) * 5;
-            const pi3 = idx * 3;
-            geo.attributes.position.array[pi3 + 2] = -h;
-
-            // Color
-            const n = gex / maxG;
-            if (n > 0) {{
-                cols[pi3] = 0; cols[pi3+1] = 0.3 + Math.min(n,1)*0.7; cols[pi3+2] = 0.7 + Math.min(n,1)*0.3;
-            }} else {{
-                const a = Math.min(-n, 1);
-                cols[pi3] = 0.7 + a*0.3; cols[pi3+1] = 0.1; cols[pi3+2] = 0.4 + a*0.35;
-            }}
-        }}
-    }}
-
-    geo.setAttribute('color', new THREE.BufferAttribute(cols, 3));
-    geo.computeVertexNormals();
-
-    const mat = new THREE.MeshPhongMaterial({{
-        vertexColors: true, side: THREE.DoubleSide,
-        shininess: 70, transparent: true, opacity: 0.92
-    }});
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.rotation.x = -Math.PI / 2;
-    scene.add(mesh);
-
-    // Wireframe
-    const wm = new THREE.MeshBasicMaterial({{ color:0xffffff, wireframe:true, transparent:true, opacity:0.04 }});
-    const wMesh = new THREE.Mesh(geo.clone(), wm);
-    wMesh.rotation.x = -Math.PI / 2;
-    scene.add(wMesh);
-
-    // Spot marker
-    const spotI = DATA.strikes.findIndex(s => s >= DATA.spot);
-    const spotX = -W/2 + (spotI / (nS-1)) * W;
-    const sg = new THREE.SphereGeometry(0.25, 32, 32);
-    const sm = new THREE.MeshBasicMaterial({{ color:0xFFD700, transparent:true, opacity:0.9 }});
-    const sMesh = new THREE.Mesh(sg, sm);
-    sMesh.position.set(spotX, 3, 0);
-    scene.add(sMesh);
-
-    // Spot glow
-    const gg = new THREE.SphereGeometry(0.5, 32, 32);
-    const gm = new THREE.MeshBasicMaterial({{ color:0xFFD700, transparent:true, opacity:0.12 }});
-    const gMesh = new THREE.Mesh(gg, gm);
-    gMesh.position.set(spotX, 3, 0);
-    scene.add(gMesh);
-
-    // Spot beam
-    const bg = new THREE.CylinderGeometry(0.015, 0.015, 7, 8);
-    const bm = new THREE.MeshBasicMaterial({{ color:0xFFD700, transparent:true, opacity:0.2 }});
-    const bMesh = new THREE.Mesh(bg, bm);
-    bMesh.position.set(spotX, 0, 0);
-    scene.add(bMesh);
-
-    // Camera orbit
-    let theta = 0.7, phi = 0.55, radius = 22;
-    let mouseDown = false, lastX = 0, lastY = 0;
-
-    camera.position.set(15, 12, 15);
-    camera.lookAt(0, 1, 0);
-
-    renderer.domElement.addEventListener('mousedown', e => {{ mouseDown=true; lastX=e.clientX; lastY=e.clientY; }});
-    renderer.domElement.addEventListener('mousemove', e => {{
-        if (!mouseDown) return;
-        theta -= (e.clientX - lastX) * 0.005;
-        phi = Math.max(0.15, Math.min(1.4, phi + (e.clientY - lastY) * 0.005));
-        lastX = e.clientX; lastY = e.clientY;
-    }});
-    renderer.domElement.addEventListener('mouseup', () => mouseDown=false);
-    renderer.domElement.addEventListener('mouseleave', () => mouseDown=false);
-    renderer.domElement.addEventListener('wheel', e => {{
-        radius = Math.max(8, Math.min(40, radius + e.deltaY * 0.015));
-    }});
-
-    // Touch support
-    renderer.domElement.addEventListener('touchstart', e => {{
-        if (e.touches.length === 1) {{ mouseDown=true; lastX=e.touches[0].clientX; lastY=e.touches[0].clientY; }}
-    }});
-    renderer.domElement.addEventListener('touchmove', e => {{
-        if (!mouseDown || e.touches.length !== 1) return;
-        theta -= (e.touches[0].clientX - lastX) * 0.005;
-        phi = Math.max(0.15, Math.min(1.4, phi + (e.touches[0].clientY - lastY) * 0.005));
-        lastX = e.touches[0].clientX; lastY = e.touches[0].clientY;
-    }});
-    renderer.domElement.addEventListener('touchend', () => mouseDown=false);
-
-    function toggleRotate() {{
-        autoRotate = !autoRotate;
-        document.getElementById('btnRotate').classList.toggle('active', autoRotate);
-    }}
-    function resetCamera() {{ theta=0.7; phi=0.55; radius=22; }}
-
-    let t = 0;
-    function animate() {{
-        requestAnimationFrame(animate);
-        t += 0.01;
-        if (autoRotate) theta += 0.0015;
-
-        camera.position.set(
-            radius * Math.sin(phi) * Math.cos(theta),
-            Math.max(2, radius * Math.cos(phi)),
-            radius * Math.sin(phi) * Math.sin(theta)
-        );
-        camera.lookAt(0, 1, 0);
-
-        // Pulse spot
-        sMesh.position.y = 3 + Math.sin(t * 2) * 0.15;
-        gMesh.position.y = sMesh.position.y;
-        gMesh.scale.setScalar(1 + Math.sin(t * 3) * 0.1);
-
-        renderer.render(scene, camera);
-    }}
-    animate();
-
-    window.addEventListener('resize', () => {{
-        camera.aspect = window.innerWidth / window.innerHeight;
-        camera.updateProjectionMatrix();
-        renderer.setSize(window.innerWidth, window.innerHeight);
-    }});
-    </script>
-    </body>
-    </html>
-    """
-    components.html(html, height=550, scrolling=False)
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # UI COMPONENTS
@@ -1587,7 +1700,8 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer):
     data = calculate_charm_exposure(data)
 
     metrics = compute_all_metrics(data, spot)
-    max_pain, pain_by_strike, _ = calculate_max_pain(data, spot)
+    max_pain, pain_by_strike, _, mp_expiry, call_pain_curve, put_pain_curve = calculate_max_pain(data, spot)
+    mp_term_structure = calculate_max_pain_term_structure(data, spot)
     profiles = calculate_gamma_profile(data, spot, dealer)
     prob = calculate_pinning_probability(max_pain, spot, metrics["total_gex"],
                                          metrics["days_to_expiry"], metrics["iv_mean"])
@@ -1647,9 +1761,8 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer):
         "🎯 Max Pain",
         "📊 GEX Analysis",
         "📈 Gamma Profile",
-        "🔥 Heatmap & 3D",
         "⚡ DEX & Greeks",
-        "🌊 IV Surface",
+        "🌊 3D Vol Surface",
         "📋 Data",
     ])
 
@@ -1657,9 +1770,62 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer):
     # TAB 1 — MAX PAIN (original core + enhanced probability)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     with tabs[0]:
-        st.plotly_chart(chart_max_pain(pain_by_strike, max_pain, spot), use_container_width=True)
-        st.markdown("#### Pin Probability Analysis")
-        render_probability_panel(prob, max_pain, spot, metrics)
+        # Expiration selector
+        available_expiries = sorted(data["expiration"].unique())
+        expiry_labels = [f"{e.strftime('%b %d, %Y')} ({max(0,(e - pd.Timestamp.now()).days)}d)"
+                         for e in available_expiries]
+
+        if available_expiries:
+            selected_idx = st.selectbox(
+                "Select Expiration",
+                range(len(available_expiries)),
+                format_func=lambda i: expiry_labels[i],
+                index=0,
+                key="mp_expiry_select",
+            )
+            sel_expiry = available_expiries[selected_idx]
+
+            # Recalculate max pain for selected expiry
+            mp_sel, pain_sel, _, _, cp_sel, pp_sel = calculate_max_pain(data, spot, target_expiry=sel_expiry)
+            expiry_lbl = sel_expiry.strftime("%b %d, %Y")
+
+            st.plotly_chart(
+                chart_max_pain(pain_sel, mp_sel, spot, cp_sel, pp_sel, expiry_lbl),
+                use_container_width=True,
+            )
+
+            st.markdown("#### Pin Probability Analysis")
+            dte_sel = max(0, (sel_expiry - pd.Timestamp.now()).days)
+            prob_sel = calculate_pinning_probability(mp_sel, spot, metrics["total_gex"],
+                                                     dte_sel, metrics["iv_mean"])
+            render_probability_panel(prob_sel, mp_sel, spot, {**metrics, "days_to_expiry": dte_sel})
+        else:
+            st.warning("No expiration dates available.")
+
+        # Term structure
+        if mp_term_structure:
+            st.markdown("---")
+            st.markdown("##### Max Pain Term Structure")
+            st.plotly_chart(chart_max_pain_term_structure(mp_term_structure, spot), use_container_width=True)
+
+            # Term structure table
+            ts_cols = st.columns(min(len(mp_term_structure), 6))
+            for i, ts in enumerate(mp_term_structure[:6]):
+                with ts_cols[i]:
+                    d_pct = ts["distance_pct"]
+                    st.markdown(f"""
+                    <div class="glass-card" style="text-align:center; padding:10px;">
+                        <div style="color:var(--text-muted); font-size:10px; font-family:var(--font-mono);">
+                            {ts['expiry'].strftime('%b %d')} ({ts['dte']}d)
+                        </div>
+                        <div style="color:var(--text-primary); font-size:17px; font-weight:700;">
+                            ${ts['max_pain']:.2f}
+                        </div>
+                        <div style="color:{'#00FF88' if d_pct >= 0 else '#FF4466'}; font-size:11px; font-family:var(--font-mono);">
+                            {d_pct:+.2f}%
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # TAB 2 — GEX ANALYSIS (merges original: by strike, by expiry, calls/puts, cumulative)
@@ -1783,29 +1949,9 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer):
             st.plotly_chart(chart_gamma_by_expiry(profiles, spot, ticker), use_container_width=True)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # TAB 4 — HEATMAP & 3D (new features combined)
+    # TAB 4 — DEX & GREEKS (delta exposure + vanna + charm)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     with tabs[3]:
-        st.plotly_chart(chart_gamma_heatmap(data, spot, strike_range), use_container_width=True)
-        st.markdown("""
-        <div style="color:var(--text-muted); font-size:12px; font-family:var(--font-mono); margin-bottom:16px;">
-            Gamma walls shown as bright zones. Cyan = positive (support). Magenta = negative (vulnerability).
-        </div>
-        """, unsafe_allow_html=True)
-
-        st.markdown("---")
-        st.markdown("##### 🏔️ 3D Gamma Terrain")
-        st.markdown("""
-        <div style="color:var(--text-muted); font-size:12px; margin-bottom:8px; font-family:var(--font-mono);">
-            🖱️ Drag to orbit · Scroll to zoom · Touch supported
-        </div>
-        """, unsafe_allow_html=True)
-        render_3d_terrain(data, spot, strike_range)
-
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # TAB 5 — DEX & GREEKS (new: delta exposure + vanna + charm)
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    with tabs[4]:
         # DEX by strike
         st.plotly_chart(chart_dex_by_strike(spot, data, strike_range), use_container_width=True)
         c1, c2, c3 = st.columns(3)
@@ -1842,10 +1988,9 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer):
         """, unsafe_allow_html=True)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # TAB 6 — IV SURFACE (new)
+    # TAB 5 — 3D VOL SURFACE (Three.js interactive)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    with tabs[5]:
-        st.plotly_chart(chart_iv_smile(data, spot), use_container_width=True)
+    with tabs[4]:
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             st.metric("IV Mean", f"{metrics['iv_mean']*100:.1f}%")
@@ -1859,10 +2004,17 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer):
                       delta="Put Premium" if skew > 0 else "Call Premium",
                       delta_color="inverse" if skew > 0 else "normal")
 
+        st.markdown("""
+        <div style="color:var(--text-muted); font-size:12px; margin-bottom:4px; font-family:var(--font-mono);">
+            🖱️ Drag to orbit · Scroll to zoom · Touch supported · Toggle wireframe overlay
+        </div>
+        """, unsafe_allow_html=True)
+        render_3d_iv_surface(data, spot, strike_range, metrics)
+
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # TAB 7 — DATA (original: table + CSV download)
+    # TAB 6 — DATA (table + CSV download)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    with tabs[6]:
+    with tabs[5]:
         st.markdown("##### Options Data")
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -2037,7 +2189,7 @@ def main():
                                             codata = calculate_gex(cspot, codata, dealer)
                                             codata = calculate_dex(cspot, codata, dealer)
                                             cmetrics = compute_all_metrics(codata, cspot)
-                                            cmax_pain, _, _ = calculate_max_pain(codata, cspot)
+                                            cmax_pain, _, _, _, _, _ = calculate_max_pain(codata, cspot)
                                             cprofiles = calculate_gamma_profile(codata, cspot, dealer)
                                             compare_data.append({
                                                 "ticker": ct, "spot": cspot,
@@ -2050,7 +2202,7 @@ def main():
                                 # Add main ticker
                                 main_metrics = compute_all_metrics(
                                     calculate_gex(spot, odata, dealer), spot)
-                                main_mp, _, _ = calculate_max_pain(odata, spot)
+                                main_mp, _, _, _, _, _ = calculate_max_pain(odata, spot)
                                 main_prof = calculate_gamma_profile(odata, spot, dealer)
 
                                 all_tickers = [{"ticker": ticker, "spot": spot,
