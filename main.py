@@ -1481,9 +1481,10 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
     strike_bins = np.linspace(iv_df["strike"].min(), iv_df["strike"].max(), n_strike_bins + 1)
     dte_max = min(iv_df["dte"].max(), 120)
     dte_bins = np.linspace(0, dte_max, n_dte_bins + 1)
-    iv_df["s_bin"] = pd.cut(iv_df["strike"], bins=strike_bins, labels=strike_bins[:-1]).astype(float)
-    iv_df["d_bin"] = pd.cut(iv_df["dte"], bins=dte_bins, labels=dte_bins[:-1]).astype(float)
+    iv_df["s_bin"] = pd.cut(iv_df["strike"], bins=strike_bins, labels=strike_bins[:-1], include_lowest=True).astype(float)
+    iv_df["d_bin"] = pd.cut(iv_df["dte"], bins=dte_bins, labels=dte_bins[:-1], include_lowest=True).astype(float)
     pivot = iv_df.pivot_table(values="iv", index="s_bin", columns="d_bin", aggfunc="mean")
+    pivot = pivot.loc[pivot.index.notna(), pivot.columns.notna()]
     pivot = pivot.interpolate(axis=0, limit=3).interpolate(axis=1, limit=3).bfill().ffill().fillna(0)
 
     strikes_list = [float(s) for s in pivot.index]
@@ -1891,26 +1892,39 @@ def render_3d_gex_surface(data: pd.DataFrame, spot: float, strike_range: float, 
         st.warning("Datos de GEX insuficientes para la superficie 3D.")
         return
 
-    gex_col = "GEX"
-    pivot = df.pivot_table(values=gex_col, index="strike", columns="dte", aggfunc="sum")
-    pivot = pivot.fillna(0) / 1e6  # in $M
+    # Build rows per expiration (mirrors IV surface approach)
+    rows = []
+    for exp in df["expiration"].unique():
+        edf = df[df["expiration"] == exp]
+        dte = int(edf["dte"].iloc[0])
+        gex_by_strike = edf.groupby("strike")["GEX"].sum()
+        for strike, gex_val in gex_by_strike.items():
+            rows.append({"strike": float(strike), "dte": dte, "gex": float(gex_val) / 1e6})
 
-    n_strike_bins = min(35, len(pivot.index))
-    n_dte_bins = min(20, len(pivot.columns))
+    if not rows:
+        st.warning("Datos insuficientes para la superficie GEX 3D.")
+        return
+
+    gex_df = pd.DataFrame(rows)
+    n_strike_bins = min(35, gex_df["strike"].nunique())
+    n_dte_bins = min(20, gex_df["dte"].nunique())
+
     if n_strike_bins < 3 or n_dte_bins < 2:
         st.warning("Datos insuficientes para la superficie GEX 3D.")
         return
 
-    # Rebin for smoothness
-    strike_bins = np.linspace(pivot.index.min(), pivot.index.max(), n_strike_bins + 1)
-    dte_bins = np.linspace(pivot.columns.min(), pivot.columns.max(), n_dte_bins + 1)
-
-    rebinned = df.copy()
-    rebinned[gex_col] = rebinned[gex_col] / 1e6
-    rebinned["s_bin"] = pd.cut(rebinned["strike"], bins=strike_bins, labels=strike_bins[:-1]).astype(float)
-    rebinned["d_bin"] = pd.cut(rebinned["dte"], bins=dte_bins, labels=dte_bins[:-1]).astype(float)
-    pv = rebinned.pivot_table(values=gex_col, index="s_bin", columns="d_bin", aggfunc="sum").fillna(0)
+    strike_bins = np.linspace(gex_df["strike"].min(), gex_df["strike"].max(), n_strike_bins + 1)
+    dte_max = min(gex_df["dte"].max(), 120)
+    dte_bins = np.linspace(0, max(dte_max, 1), n_dte_bins + 1)
+    gex_df["s_bin"] = pd.cut(gex_df["strike"], bins=strike_bins, labels=strike_bins[:-1], include_lowest=True).astype(float)
+    gex_df["d_bin"] = pd.cut(gex_df["dte"], bins=dte_bins, labels=dte_bins[:-1], include_lowest=True).astype(float)
+    pv = gex_df.pivot_table(values="gex", index="s_bin", columns="d_bin", aggfunc="sum")
+    pv = pv.loc[pv.index.notna(), pv.columns.notna()]  # drop NaN indices
     pv = pv.interpolate(axis=0, limit=2).interpolate(axis=1, limit=2).fillna(0)
+
+    if pv.shape[0] < 3 or pv.shape[1] < 2:
+        st.warning("Datos insuficientes para la superficie GEX 3D.")
+        return
 
     strikes_list = [float(s) for s in pv.index]
     dtes_list = [float(d) for d in pv.columns]
@@ -3033,12 +3047,9 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
     # TAB 6 — 3D SURFACES (IV + GEX)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     with tabs[6]:
-        surface_mode = st.radio(
-            "Tipo de Superficie", ["Volatilidad Implícita", "Exposición Gamma (GEX)"],
-            horizontal=True, label_visibility="collapsed"
-        )
+        surf_iv, surf_gex = st.tabs(["🌊 Volatilidad Implícita", "🔥 Exposición Gamma (GEX)"])
 
-        if surface_mode == "Volatilidad Implícita":
+        with surf_iv:
             c1, c2, c3, c4 = st.columns(4)
             with c1:
                 st.metric("IV Media", f"{metrics['iv_mean']*100:.1f}%")
@@ -3059,7 +3070,7 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
             """, unsafe_allow_html=True)
             render_3d_iv_surface(data, spot, strike_range, metrics)
 
-        else:
+        with surf_gex:
             c1, c2, c3 = st.columns(3)
             with c1:
                 total_gex = metrics.get("total_gex", 0)
