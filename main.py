@@ -1870,6 +1870,170 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
 
 
 
+
+
+def render_gex_scenario(data: pd.DataFrame, spot: float, strike_range: float, profiles: dict, dealer: str = "standard"):
+    """GEX Scenario Simulator — What happens to gamma if price moves to $X?"""
+    st.markdown("##### 🎮 GEX Scenario Simulator")
+    st.markdown("""
+    <div style="color:var(--text-muted); font-size:12px; margin-bottom:12px;">
+        Simulate how dealer gamma exposure shifts when the underlying moves.
+        Drag the slider to see how the gamma profile recalculates at each simulated spot.
+    </div>
+    """, unsafe_allow_html=True)
+
+    lo_bound = spot * (1 - strike_range / 100)
+    hi_bound = spot * (1 + strike_range / 100)
+
+    # Helper: get net GEX at a specific price from a profile
+    def gex_at_price(prof, price):
+        idx = np.abs(prof["strikes"] - price).argmin()
+        return prof["aggregate_gamma"][idx]
+
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        sim_spot = st.slider(
+            "Simulated Spot Price",
+            min_value=float(round(lo_bound, 2)),
+            max_value=float(round(hi_bound, 2)),
+            value=float(round(spot, 2)),
+            step=float(round((hi_bound - lo_bound) / 200, 2)),
+            format="$%.2f",
+        )
+    with c2:
+        pct_move = (sim_spot - spot) / spot * 100
+        color = "#00FF88" if pct_move >= 0 else "#FF4466"
+        st.markdown(f"""
+        <div style="text-align:center; padding-top:8px;">
+            <div style="font-size:10px; color:#4A5568; text-transform:uppercase; letter-spacing:1px;">Move</div>
+            <div style="font-size:24px; font-weight:700; color:{color};">{pct_move:+.2f}%</div>
+            <div style="font-size:11px; color:#4A5568;">${sim_spot - spot:+.2f}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Current profile (already computed)
+    profiles_now = profiles
+
+    # Simulated profile (recalculated at new spot)
+    profiles_sim = calculate_gamma_profile(data, sim_spot, dealer)
+
+    # Key metrics
+    flip_now = profiles_now["gamma_flip"]
+    flip_sim = profiles_sim["gamma_flip"]
+    gex_now = gex_at_price(profiles_now, spot)
+    gex_sim = gex_at_price(profiles_sim, sim_spot)
+
+    regime_now = "Positive γ" if gex_now >= 0 else "Negative γ"
+    regime_sim = "Positive γ" if gex_sim >= 0 else "Negative γ"
+    regime_color_sim = "#00FF88" if gex_sim >= 0 else "#FF4466"
+    regime_change = (gex_now >= 0) != (gex_sim >= 0)
+
+    cols = st.columns(4)
+    with cols[0]:
+        st.metric("Net GEX (now)", f"${gex_now:.3f}B")
+    with cols[1]:
+        delta_gex = gex_sim - gex_now
+        st.metric("Net GEX (sim)", f"${gex_sim:.3f}B",
+                  delta=f"{delta_gex:+.3f}B")
+    with cols[2]:
+        st.metric("γ Flip (now)", f"${flip_now:.2f}")
+    with cols[3]:
+        st.metric("γ Flip (sim)", f"${flip_sim:.2f}",
+                  delta=f"${flip_sim - flip_now:+.2f}")
+
+    if regime_change:
+        st.error(f"⚠️ **REGIME CHANGE** — Moving from **{regime_now}** to **{regime_sim}**. "
+                 f"Crossing the gamma flip switches dealer hedging from "
+                 f"{'stabilizing → amplifying' if gex_sim < 0 else 'amplifying → stabilizing'}.")
+
+    # ── Overlay chart: current vs simulated gamma profile ──
+    strikes_now = profiles_now["strikes"]
+    gamma_now = profiles_now["aggregate_gamma"]
+    strikes_sim = profiles_sim["strikes"]
+    gamma_sim = profiles_sim["aggregate_gamma"]
+
+    fig = go.Figure()
+
+    # Positive/negative fill for CURRENT
+    pos_now = np.where(gamma_now >= 0, gamma_now, 0)
+    neg_now = np.where(gamma_now < 0, gamma_now, 0)
+
+    fig.add_trace(go.Scatter(
+        x=strikes_now, y=pos_now,
+        mode="lines", name="Current (+)", showlegend=False,
+        line=dict(width=0), fill="tozeroy",
+        fillcolor="rgba(0,255,136,0.08)",
+    ))
+    fig.add_trace(go.Scatter(
+        x=strikes_now, y=neg_now,
+        mode="lines", name="Current (−)", showlegend=False,
+        line=dict(width=0), fill="tozeroy",
+        fillcolor="rgba(255,68,102,0.08)",
+    ))
+
+    # Current line
+    fig.add_trace(go.Scatter(
+        x=strikes_now, y=gamma_now,
+        mode="lines", name=f"Current (${spot:.0f})",
+        line=dict(color="#00D9FF", width=2.5),
+    ))
+
+    # Simulated line
+    fig.add_trace(go.Scatter(
+        x=strikes_sim, y=gamma_sim,
+        mode="lines", name=f"Simulated (${sim_spot:.0f})",
+        line=dict(color="#FE53BB", width=2.5, dash="dash"),
+    ))
+
+    # Current spot vline
+    fig.add_vline(x=spot, line_dash="dash", line_color="#FFD700", line_width=1.5, opacity=0.6)
+    fig.add_annotation(x=spot, y=max(gamma_now) * 0.95, text=f"Now ${spot:.0f}",
+                       showarrow=False, font=dict(color="#FFD700", size=10))
+
+    # Simulated spot vline
+    if abs(sim_spot - spot) > 0.5:
+        fig.add_vline(x=sim_spot, line_dash="dot", line_color="#FE53BB", line_width=1.5, opacity=0.6)
+        fig.add_annotation(x=sim_spot, y=max(gamma_sim) * 0.88, text=f"Sim ${sim_spot:.0f}",
+                           showarrow=False, font=dict(color="#FE53BB", size=10))
+
+    # Gamma flip markers
+    fig.add_vline(x=flip_now, line_dash="dash", line_color="rgba(255,255,255,0.15)", line_width=1)
+    fig.add_annotation(x=flip_now, y=min(gamma_now) * 0.8, text=f"Flip ${flip_now:.0f}",
+                       showarrow=False, font=dict(color="rgba(255,255,255,0.4)", size=9))
+
+    # Zero line
+    fig.add_hline(y=0, line_color="rgba(255,255,255,0.15)", line_width=1)
+
+    fig.update_layout(**_base_layout(
+        title=dict(text="Gamma Profile — Current vs Simulated", font=dict(size=16)),
+        height=440, showlegend=True,
+        legend=dict(x=0.01, y=0.99, font=dict(size=10)),
+        xaxis=dict(title="Price ($)"),
+        yaxis=dict(title="Net Gamma ($Bn / 1% move)"),
+    ))
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── Dealer flow interpretation ──
+    if abs(pct_move) > 0.05:
+        direction = "rallies" if pct_move > 0 else "sells off"
+        if gex_sim >= 0:
+            flow_desc = "dealers will <b>sell into rallies</b> and <b>buy dips</b> → stabilizing, mean-reverting"
+        else:
+            flow_desc = "dealers will <b>buy into rallies</b> and <b>sell into dips</b> → amplifying, trending"
+
+        st.markdown(f"""
+        <div style="background:rgba(0,217,255,0.04); border:1px solid rgba(0,217,255,0.1);
+                    border-radius:10px; padding:14px 18px; font-size:12px; color:var(--text-secondary); line-height:1.7;">
+            <b style="color:#E8ECF4;">Scenario:</b> If price {direction}
+            <b>{pct_move:+.1f}%</b> to <b>${sim_spot:.2f}</b>:<br/>
+            Net gamma moves from <b>${gex_now:.3f}B</b> → <b style="color:{regime_color_sim}">${gex_sim:.3f}B</b>.
+            At the simulated price, {flow_desc}.
+            {'<br/><span style="color:#FF4466; font-weight:600;">⚠️ This crosses the gamma flip — expect a volatility regime change.</span>' if regime_change else ''}
+        </div>
+        """, unsafe_allow_html=True)
+
+
 def chart_vanna_charm(data: pd.DataFrame, spot: float, strike_range: float) -> go.Figure:
     """Vanna and Charm exposure combined chart"""
     lo, hi = spot * (1 - strike_range / 100), spot * (1 + strike_range / 100)
@@ -2198,6 +2362,7 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
         "🎯 Max Pain",
         "📊 GEX Analysis",
         "📈 Gamma Profile",
+        "🎮 Scenario Sim",
         "⚡ DEX & Greeks",
         "🌊 3D Vol Surface",
         "📋 Data",
@@ -2487,9 +2652,15 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
             st.plotly_chart(chart_gamma_by_expiry(profiles, spot, ticker), use_container_width=True)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # TAB 4 — DEX & GREEKS (delta exposure + vanna + charm)
+    # TAB 4 — GEX SCENARIO SIMULATOR
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     with tabs[4]:
+        render_gex_scenario(data, spot, strike_range, profiles, dealer)
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # TAB 5 — DEX & GREEKS (delta exposure + vanna + charm)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    with tabs[5]:
         # DEX by strike
         st.plotly_chart(chart_dex_by_strike(spot, data, strike_range), use_container_width=True)
         c1, c2, c3 = st.columns(3)
@@ -2526,9 +2697,9 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
         """, unsafe_allow_html=True)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # TAB 5 — 3D VOL SURFACE (Three.js interactive)
+    # TAB 6 — 3D VOL SURFACE (Three.js interactive)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    with tabs[5]:
+    with tabs[6]:
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             st.metric("IV Mean", f"{metrics['iv_mean']*100:.1f}%")
@@ -2550,9 +2721,9 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
         render_3d_iv_surface(data, spot, strike_range, metrics)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # TAB 6 — DATA (table + CSV download)
+    # TAB 7 — DATA (table + CSV download)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    with tabs[6]:
+    with tabs[7]:
         st.markdown("##### Options Data")
         c1, c2, c3 = st.columns(3)
         with c1:
