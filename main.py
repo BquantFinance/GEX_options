@@ -71,9 +71,18 @@ THEME_CSS = """
     font-family: var(--font-display);
 }
 
-/* Hide default streamlit chrome */
-#MainMenu, footer, header {visibility: hidden;}
+/* Hide default streamlit chrome — but keep sidebar toggle */
+#MainMenu, footer {visibility: hidden;}
 .stDeployButton {display: none;}
+header[data-testid="stHeader"] {
+    background: transparent !important;
+}
+/* Ensure sidebar collapse/expand button stays visible */
+button[data-testid="stSidebarCollapseButton"],
+[data-testid="collapsedControl"] {
+    visibility: visible !important;
+    color: var(--text-secondary) !important;
+}
 
 /* ── Sidebar ── */
 section[data-testid="stSidebar"] {
