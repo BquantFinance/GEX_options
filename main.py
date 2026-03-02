@@ -453,7 +453,7 @@ def parse_option_data(raw_data: dict) -> Tuple[float, pd.DataFrame]:
         option_data = pd.DataFrame(data.loc["options", "data"])
         return spot_price, option_data
     except Exception as e:
-        st.error(f"Parse error: {e}")
+        st.error(f"Error de formato: {e}")
         return 0, pd.DataFrame()
 
 
@@ -737,7 +737,7 @@ def calculate_pinning_probability(max_pain, spot, total_gex, days_to_exp, iv_mea
 
     return {
         "probability": round(prob),
-        "direction": "BULLISH" if max_pain > spot else "BEARISH" if max_pain < spot else "NEUTRAL",
+        "direction": "ALCISTA" if max_pain > spot else "BAJISTA" if max_pain < spot else "NEUTRAL",
         "distance_pct": distance_pct,
         "expected_move": expected_move_pct,
     }
@@ -944,7 +944,7 @@ def chart_price_with_levels(price_df: pd.DataFrame, spot: float, max_pain: float
         low=price_df["low"], close=price_df["close"],
         increasing_line_color="#00FF88", decreasing_line_color="#FF4466",
         increasing_fillcolor="rgba(0,255,136,0.25)", decreasing_fillcolor="rgba(255,68,102,0.25)",
-        name="Price",
+        name="Precio",
     ))
 
     # Volume bars on secondary y
@@ -1143,7 +1143,7 @@ def chart_gamma_profile(profiles: dict, spot: float, ticker: str) -> go.Figure:
 
     fig.add_trace(go.Scatter(
         x=profiles["strikes"], y=profiles["aggregate_gamma"],
-        mode="lines", name="Net Gamma",
+        mode="lines", name="Gamma Neta",
         line=dict(color=COLORS["cyan"], width=2.5),
         fill="tozeroy",
         fillcolor="rgba(0,217,255,0.08)",
@@ -1152,7 +1152,7 @@ def chart_gamma_profile(profiles: dict, spot: float, ticker: str) -> go.Figure:
 
     fig.add_trace(go.Scatter(
         x=profiles["strikes"], y=profiles["call_gamma"],
-        mode="lines", name="Call Gamma",
+        mode="lines", name="Gamma Calls",
         line=dict(color=COLORS["green"], width=1.5, dash="dot"),
         opacity=0.6,
         hovertemplate="Strike: $%{x:.1f}<br>Call: %{y:.3f}B<extra></extra>",
@@ -1160,7 +1160,7 @@ def chart_gamma_profile(profiles: dict, spot: float, ticker: str) -> go.Figure:
 
     fig.add_trace(go.Scatter(
         x=profiles["strikes"], y=profiles["put_gamma"],
-        mode="lines", name="Put Gamma",
+        mode="lines", name="Gamma Puts",
         line=dict(color=COLORS["red"], width=1.5, dash="dot"),
         opacity=0.6,
         hovertemplate="Strike: $%{x:.1f}<br>Put: %{y:.3f}B<extra></extra>",
@@ -1177,7 +1177,7 @@ def chart_gamma_profile(profiles: dict, spot: float, ticker: str) -> go.Figure:
                       annotation_font=dict(size=11, color=COLORS["magenta"]))
 
     fig.update_layout(**_base_layout(
-        title=dict(text=f"Gamma Exposure Profile — {ticker}", font=dict(size=18)),
+        title=dict(text=f"Perfil de Exposición Gamma — {ticker}", font=dict(size=18)),
         yaxis_title="Gamma Exposure ($Bn / 1% move)",
         xaxis_title="Strike",
         height=500,
@@ -1241,14 +1241,14 @@ def chart_max_pain(pain_by_strike: dict, max_pain: float, spot: float,
             x=strikes, y=call_vals, mode="lines", fill="tozeroy",
             line=dict(color=COLORS["cyan"], width=1.5),
             fillcolor="rgba(0,217,255,0.12)",
-            name="Call Pain",
+            name="Dolor Calls",
             hovertemplate="Strike: $%{x:.1f}<br>Call Pain: $%{y:.2f}B<extra></extra>",
         ))
         fig.add_trace(go.Scatter(
             x=strikes, y=put_vals, mode="lines", fill="tozeroy",
             line=dict(color=COLORS["magenta"], width=1.5),
             fillcolor="rgba(254,83,187,0.12)",
-            name="Put Pain",
+            name="Dolor Puts",
             hovertemplate="Strike: $%{x:.1f}<br>Put Pain: $%{y:.2f}B<extra></extra>",
         ))
 
@@ -1256,7 +1256,7 @@ def chart_max_pain(pain_by_strike: dict, max_pain: float, spot: float,
     fig.add_trace(go.Scatter(
         x=strikes, y=values, mode="lines",
         line=dict(color=COLORS["red"], width=2.5),
-        name="Total Pain",
+        name="Dolor Total",
         hovertemplate="Strike: $%{x:.1f}<br>Total Pain: $%{y:.2f}B<extra></extra>",
     ))
 
@@ -1440,7 +1440,7 @@ def chart_cumulative_gex(data: pd.DataFrame) -> go.Figure:
 def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, metrics: dict):
     """Render 3D IV surface — Three.js, direct XYZ geometry, cinematic"""
     if "iv" not in data.columns or data["iv"].isna().all():
-        st.warning("IV data not available for 3D surface.")
+        st.warning("Datos de IV no disponibles para la superficie 3D.")
         return
 
     lo, hi = spot * (1 - strike_range / 100), spot * (1 + strike_range / 100)
@@ -1449,7 +1449,7 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
     df = df[(df["dte"] >= 0) & (df["iv"].notna()) & (df["iv"] > 0)]
 
     if df.empty:
-        st.warning("Not enough IV data to build 3D surface.")
+        st.warning("Datos de IV insuficientes para la superficie 3D.")
         return
 
     rows = []
@@ -1463,7 +1463,7 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
             rows.append({"strike": float(r["strike"]), "dte": dte, "iv": float(r["iv"]) * 100})
 
     if not rows:
-        st.warning("Not enough IV data.")
+        st.warning("Datos de IV insuficientes.")
         return
 
     iv_df = pd.DataFrame(rows)
@@ -1567,9 +1567,9 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
     <div class="hud"><div class="hud-c">
       <div class="hud-t">Vol Surface</div>
       <div class="hud-r"><span class="hud-l">Spot</span><span class="hud-v" style="color:#FFD700">${spot:.2f}</span></div>
-      <div class="hud-r"><span class="hud-l">IV Mean</span><span class="hud-v">{metrics['iv_mean']*100:.1f}%</span></div>
-      <div class="hud-r"><span class="hud-l">IV Skew</span><span class="hud-v" style="color:{'#FF4466' if metrics['iv_skew']>0 else '#00FF88'}">{metrics['iv_skew']*100:+.1f}%</span></div>
-      <div class="hud-r"><span class="hud-l">Range</span><span class="hud-v" style="font-size:10px">{iv_min_v:.0f}% — {iv_max_v:.0f}%</span></div>
+      <div class="hud-r"><span class="hud-l">IV Media</span><span class="hud-v">{metrics['iv_mean']*100:.1f}%</span></div>
+      <div class="hud-r"><span class="hud-l">Sesgo IV</span><span class="hud-v" style="color:{'#FF4466' if metrics['iv_skew']>0 else '#00FF88'}">{metrics['iv_skew']*100:+.1f}%</span></div>
+      <div class="hud-r"><span class="hud-l">Rango</span><span class="hud-v" style="font-size:10px">{iv_min_v:.0f}% — {iv_max_v:.0f}%</span></div>
     </div></div>
 
     <div class="ctr">
@@ -1879,7 +1879,7 @@ def render_3d_gex_surface(data: pd.DataFrame, spot: float, strike_range: float, 
     df = df[(df["dte"] >= 0) & (df["dte"] <= 120)]
 
     if df.empty or "GEX" not in df.columns:
-        st.warning("Not enough GEX data for 3D surface.")
+        st.warning("Datos de GEX insuficientes para la superficie 3D.")
         return
 
     gex_col = "GEX"
@@ -1889,7 +1889,7 @@ def render_3d_gex_surface(data: pd.DataFrame, spot: float, strike_range: float, 
     n_strike_bins = min(35, len(pivot.index))
     n_dte_bins = min(20, len(pivot.columns))
     if n_strike_bins < 3 or n_dte_bins < 2:
-        st.warning("Not enough data for 3D GEX surface.")
+        st.warning("Datos insuficientes para la superficie GEX 3D.")
         return
 
     # Rebin for smoothness
@@ -1979,7 +1979,7 @@ def render_3d_gex_surface(data: pd.DataFrame, spot: float, strike_range: float, 
     <div class="hud"><div class="hud-c">
       <div class="hud-t">GEX Surface</div>
       <div class="hud-r"><span class="hud-l">Spot</span><span class="hud-v" style="color:#FFD700">${spot:.2f}</span></div>
-      <div class="hud-r"><span class="hud-l">Net GEX</span><span class="hud-v" style="color:{'#00FF88' if metrics.get('total_gex',0)>=0 else '#FF4466'}">{metrics.get('total_gex',0):.3f}B</span></div>
+      <div class="hud-r"><span class="hud-l">GEX Neto</span><span class="hud-v" style="color:{'#00FF88' if metrics.get('total_gex',0)>=0 else '#FF4466'}">{metrics.get('total_gex',0):.3f}B</span></div>
       <div class="hud-r"><span class="hud-l">Peak</span><span class="hud-v">±{gex_abs_max:.1f}M</span></div>
     </div></div>
     <div class="ctr">
@@ -2198,11 +2198,11 @@ def render_3d_gex_surface(data: pd.DataFrame, spot: float, strike_range: float, 
 
 def render_gex_scenario(data: pd.DataFrame, spot: float, strike_range: float, profiles: dict, dealer: str = "standard"):
     """GEX Scenario Simulator — What happens to gamma if price moves to $X?"""
-    st.markdown("##### 🎮 GEX Scenario Simulator")
+    st.markdown("##### 🎮 Simulador de Escenarios GEX")
     st.markdown("""
     <div style="color:var(--text-muted); font-size:12px; margin-bottom:12px;">
-        Simulate how dealer gamma exposure shifts when the underlying moves.
-        Drag the slider to see how the gamma profile recalculates at each simulated spot.
+        Simula cómo cambia la exposición gamma de los dealers cuando se mueve el subyacente.
+        Arrastra el slider para ver cómo se recalcula el perfil gamma en cada precio simulado.
     </div>
     """, unsafe_allow_html=True)
 
@@ -2217,7 +2217,7 @@ def render_gex_scenario(data: pd.DataFrame, spot: float, strike_range: float, pr
     c1, c2 = st.columns([3, 1])
     with c1:
         sim_spot = st.slider(
-            "Simulated Spot Price",
+            "Precio Spot Simulado",
             min_value=float(round(lo_bound, 2)),
             max_value=float(round(hi_bound, 2)),
             value=float(round(spot, 2)),
@@ -2229,7 +2229,7 @@ def render_gex_scenario(data: pd.DataFrame, spot: float, strike_range: float, pr
         color = "#00FF88" if pct_move >= 0 else "#FF4466"
         st.markdown(f"""
         <div style="text-align:center; padding-top:8px;">
-            <div style="font-size:10px; color:#4A5568; text-transform:uppercase; letter-spacing:1px;">Move</div>
+            <div style="font-size:10px; color:#4A5568; text-transform:uppercase; letter-spacing:1px;">Movimiento</div>
             <div style="font-size:24px; font-weight:700; color:{color};">{pct_move:+.2f}%</div>
             <div style="font-size:11px; color:#4A5568;">${sim_spot - spot:+.2f}</div>
         </div>
@@ -2247,28 +2247,28 @@ def render_gex_scenario(data: pd.DataFrame, spot: float, strike_range: float, pr
     gex_now = gex_at_price(profiles_now, spot)
     gex_sim = gex_at_price(profiles_sim, sim_spot)
 
-    regime_now = "Positive γ" if gex_now >= 0 else "Negative γ"
-    regime_sim = "Positive γ" if gex_sim >= 0 else "Negative γ"
+    regime_now = "γ Positiva" if gex_now >= 0 else "γ Negativa"
+    regime_sim = "γ Positiva" if gex_sim >= 0 else "γ Negativa"
     regime_color_sim = "#00FF88" if gex_sim >= 0 else "#FF4466"
     regime_change = (gex_now >= 0) != (gex_sim >= 0)
 
     cols = st.columns(4)
     with cols[0]:
-        st.metric("Net GEX (now)", f"${gex_now:.3f}B")
+        st.metric("GEX Neto (actual)", f"${gex_now:.3f}B")
     with cols[1]:
         delta_gex = gex_sim - gex_now
-        st.metric("Net GEX (sim)", f"${gex_sim:.3f}B",
+        st.metric("GEX Neto (sim)", f"${gex_sim:.3f}B",
                   delta=f"{delta_gex:+.3f}B")
     with cols[2]:
-        st.metric("γ Flip (now)", f"${flip_now:.2f}")
+        st.metric("γ Flip (actual)", f"${flip_now:.2f}")
     with cols[3]:
         st.metric("γ Flip (sim)", f"${flip_sim:.2f}",
                   delta=f"${flip_sim - flip_now:+.2f}")
 
     if regime_change:
-        st.error(f"⚠️ **REGIME CHANGE** — Moving from **{regime_now}** to **{regime_sim}**. "
-                 f"Crossing the gamma flip switches dealer hedging from "
-                 f"{'stabilizing → amplifying' if gex_sim < 0 else 'amplifying → stabilizing'}.")
+        st.error(f"⚠️ **CAMBIO DE RÉGIMEN** — Pasando de **{regime_now}** a **{regime_sim}**. "
+                 f"Cruzar el gamma flip cambia la cobertura de los dealers de "
+                 f"{'estabilizador → amplificador' if gex_sim < 0 else 'amplificador → estabilizador'}.")
 
     # ── Overlay chart: current vs simulated gamma profile ──
     strikes_now = profiles_now["strikes"]
@@ -2298,20 +2298,20 @@ def render_gex_scenario(data: pd.DataFrame, spot: float, strike_range: float, pr
     # Current line
     fig.add_trace(go.Scatter(
         x=strikes_now, y=gamma_now,
-        mode="lines", name=f"Current (${spot:.0f})",
+        mode="lines", name=f"Actual (${spot:.0f})",
         line=dict(color="#00D9FF", width=2.5),
     ))
 
     # Simulated line
     fig.add_trace(go.Scatter(
         x=strikes_sim, y=gamma_sim,
-        mode="lines", name=f"Simulated (${sim_spot:.0f})",
+        mode="lines", name=f"Simulado (${sim_spot:.0f})",
         line=dict(color="#FE53BB", width=2.5, dash="dash"),
     ))
 
     # Current spot vline
     fig.add_vline(x=spot, line_dash="dash", line_color="#FFD700", line_width=1.5, opacity=0.6)
-    fig.add_annotation(x=spot, y=max(gamma_now) * 0.95, text=f"Now ${spot:.0f}",
+    fig.add_annotation(x=spot, y=max(gamma_now) * 0.95, text=f"Actual ${spot:.0f}",
                        showarrow=False, font=dict(color="#FFD700", size=10))
 
     # Simulated spot vline
@@ -2329,31 +2329,31 @@ def render_gex_scenario(data: pd.DataFrame, spot: float, strike_range: float, pr
     fig.add_hline(y=0, line_color="rgba(255,255,255,0.15)", line_width=1)
 
     fig.update_layout(**_base_layout(
-        title=dict(text="Gamma Profile — Current vs Simulated", font=dict(size=16)),
+        title=dict(text="Perfil Gamma — Actual vs Simulado", font=dict(size=16)),
         height=440, showlegend=True,
         legend=dict(x=0.01, y=0.99, font=dict(size=10)),
-        xaxis=dict(title="Price ($)"),
-        yaxis=dict(title="Net Gamma ($Bn / 1% move)"),
+        xaxis=dict(title="Precio ($)"),
+        yaxis=dict(title="Gamma Neto ($Bn / 1% mov.)"),
     ))
 
     st.plotly_chart(fig, use_container_width=True)
 
     # ── Dealer flow interpretation ──
     if abs(pct_move) > 0.05:
-        direction = "rallies" if pct_move > 0 else "sells off"
+        direction = "sube" if pct_move > 0 else "cae"
         if gex_sim >= 0:
-            flow_desc = "dealers will <b>sell into rallies</b> and <b>buy dips</b> → stabilizing, mean-reverting"
+            flow_desc = "los dealers <b>venderán en subidas</b> y <b>comprarán en caídas</b> → estabilizador, reversión a la media"
         else:
-            flow_desc = "dealers will <b>buy into rallies</b> and <b>sell into dips</b> → amplifying, trending"
+            flow_desc = "los dealers <b>comprarán en subidas</b> y <b>venderán en caídas</b> → amplificador, tendencial"
 
         st.markdown(f"""
         <div style="background:rgba(0,217,255,0.04); border:1px solid rgba(0,217,255,0.1);
                     border-radius:10px; padding:14px 18px; font-size:12px; color:var(--text-secondary); line-height:1.7;">
-            <b style="color:#E8ECF4;">Scenario:</b> If price {direction}
+            <b style="color:#E8ECF4;">Escenario:</b> Si el precio {direction}
             <b>{pct_move:+.1f}%</b> to <b>${sim_spot:.2f}</b>:<br/>
-            Net gamma moves from <b>${gex_now:.3f}B</b> → <b style="color:{regime_color_sim}">${gex_sim:.3f}B</b>.
-            At the simulated price, {flow_desc}.
-            {'<br/><span style="color:#FF4466; font-weight:600;">⚠️ This crosses the gamma flip — expect a volatility regime change.</span>' if regime_change else ''}
+            El gamma neto pasa de <b>${gex_now:.3f}B</b> → <b style="color:{regime_color_sim}">${gex_sim:.3f}B</b>.
+            Al precio simulado, {flow_desc}.
+            {'<br/><span style="color:#FF4466; font-weight:600;">⚠️ Se cruza el gamma flip — esperar cambio de régimen de volatilidad.</span>' if regime_change else ''}
         </div>
         """, unsafe_allow_html=True)
 
@@ -2364,7 +2364,7 @@ def chart_vanna_charm(data: pd.DataFrame, spot: float, strike_range: float) -> g
     df = data[(data["strike"] >= lo) & (data["strike"] <= hi)]
 
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
-                        subplot_titles=("Vanna Exposure", "Charm Exposure"))
+                        subplot_titles=("Exposición Vanna", "Exposición Charm"))
 
     if "vanna_approx" in df.columns:
         vanna = df.groupby("strike")["vanna_approx"].sum() / 1e6
@@ -2424,16 +2424,16 @@ def render_key_levels(spot, max_pain, gamma_flip, metrics):
 
     # Regime
     if gex > 0:
-        regime_html = '<span class="regime-badge regime-positive">⬢ POSITIVE GAMMA</span>'
+        regime_html = '<span class="regime-badge regime-positive">⬢ GAMMA POSITIVA</span>'
     else:
-        regime_html = '<span class="regime-badge regime-negative">⬡ NEGATIVE GAMMA</span>'
+        regime_html = '<span class="regime-badge regime-negative">⬡ GAMMA NEGATIVA</span>'
 
     st.markdown(f"""
     <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:8px;">
         <div>{regime_html}</div>
         <div style="font-family:var(--font-mono); font-size:11px; color:var(--text-muted);">
-            IV Mean: {metrics['iv_mean']*100:.1f}% &nbsp;|&nbsp;
-            IV Skew: {metrics['iv_skew']*100:+.1f}% &nbsp;|&nbsp;
+            IV Media: {metrics['iv_mean']*100:.1f}% &nbsp;|&nbsp;
+            Sesgo IV: {metrics['iv_skew']*100:+.1f}% &nbsp;|&nbsp;
             P/C Vol: {metrics['vol_put_call']:.2f} &nbsp;|&nbsp;
             OI: {metrics['total_oi']:,.0f}
         </div>
@@ -2460,7 +2460,7 @@ def render_key_levels(spot, max_pain, gamma_flip, metrics):
             <div class="delta" style="color:{'#00FF88' if mg_delta >= 0 else '#FF4466'};">{mg_delta:+.2f}%</div>
         </div>
         <div class="level-chip">
-            <div class="label">Net GEX</div>
+            <div class="label">GEX Neto</div>
             <div class="value" style="color:{'#00FF88' if gex > 0 else '#FF4466'};">${gex:.3f}B</div>
         </div>
         <div class="level-chip">
@@ -2475,11 +2475,11 @@ def render_probability_panel(prob_data, max_pain, spot, metrics):
     """Pin probability analysis panel"""
     prob = prob_data["probability"]
     if prob >= 70:
-        color, status = "#00FF88", "STRONG SIGNAL"
+        color, status = "#00FF88", "SEÑAL FUERTE"
     elif prob >= 50:
-        color, status = "#FFD700", "MODERATE"
+        color, status = "#FFD700", "MODERADA"
     else:
-        color, status = "#FF4466", "WEAK"
+        color, status = "#FF4466", "DÉBIL"
 
     direction = prob_data["direction"]
     dist = prob_data["distance_pct"]
@@ -2491,7 +2491,7 @@ def render_probability_panel(prob_data, max_pain, spot, metrics):
         <div class="glass-card" style="text-align:center;">
             <div style="font-size:48px; font-weight:900; color:{color}; font-family:var(--font-display);">{prob}%</div>
             <div style="color:{color}; font-size:12px; font-weight:600; letter-spacing:1px;">{status}</div>
-            <div style="color:var(--text-muted); font-size:11px; margin-top:8px;">Pin Probability</div>
+            <div style="color:var(--text-muted); font-size:11px; margin-top:8px;">Prob. de Pinning</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -2501,11 +2501,11 @@ def render_probability_panel(prob_data, max_pain, spot, metrics):
         <div class="glass-card">
             <div style="display:flex; justify-content:space-between; margin-bottom:12px;">
                 <div>
-                    <span style="color:var(--text-muted); font-size:11px; font-family:var(--font-mono); text-transform:uppercase; letter-spacing:1px;">Direction</span><br/>
+                    <span style="color:var(--text-muted); font-size:11px; font-family:var(--font-mono); text-transform:uppercase; letter-spacing:1px;">Dirección</span><br/>
                     <span style="color:{color}; font-size:20px; font-weight:700;">{direction}</span>
                 </div>
                 <div style="text-align:right;">
-                    <span style="color:var(--text-muted); font-size:11px; font-family:var(--font-mono); text-transform:uppercase; letter-spacing:1px;">Distance</span><br/>
+                    <span style="color:var(--text-muted); font-size:11px; font-family:var(--font-mono); text-transform:uppercase; letter-spacing:1px;">Distancia</span><br/>
                     <span style="color:var(--text-primary); font-size:20px; font-weight:700;">{dist:.2f}%</span>
                 </div>
             </div>
@@ -2519,20 +2519,20 @@ def render_probability_panel(prob_data, max_pain, spot, metrics):
         """, unsafe_allow_html=True)
 
     with col3:
-        speed = "SLOW (Mean Reversion)" if metrics["total_gex"] > 0 else "FAST (Momentum)"
+        speed = "LENTO (Reversión Media)" if metrics["total_gex"] > 0 else "RÁPIDO (Momentum)"
         dte = metrics["days_to_expiry"]
         st.markdown(f"""
         <div class="glass-card">
             <div style="margin-bottom:8px;">
-                <span style="color:var(--text-muted); font-size:10px; font-family:var(--font-mono); text-transform:uppercase; letter-spacing:1px;">Expected Move</span><br/>
+                <span style="color:var(--text-muted); font-size:10px; font-family:var(--font-mono); text-transform:uppercase; letter-spacing:1px;">Movimiento Esperado</span><br/>
                 <span style="color:var(--text-primary); font-size:18px; font-weight:700;">±{exp_move:.2f}%</span>
             </div>
             <div style="margin-bottom:8px;">
-                <span style="color:var(--text-muted); font-size:10px; font-family:var(--font-mono); text-transform:uppercase; letter-spacing:1px;">Speed</span><br/>
+                <span style="color:var(--text-muted); font-size:10px; font-family:var(--font-mono); text-transform:uppercase; letter-spacing:1px;">Velocidad</span><br/>
                 <span style="color:var(--text-secondary); font-size:12px;">{speed}</span>
             </div>
             <div>
-                <span style="color:var(--text-muted); font-size:10px; font-family:var(--font-mono); text-transform:uppercase; letter-spacing:1px;">Nearest Expiry</span><br/>
+                <span style="color:var(--text-muted); font-size:10px; font-family:var(--font-mono); text-transform:uppercase; letter-spacing:1px;">Venc. Próximo</span><br/>
                 <span style="color:{'#00FF88' if dte <= 1 else 'var(--text-primary)'}; font-size:18px; font-weight:700;">
                     {'0DTE ⚡' if dte == 0 else f'{dte}d'}
                 </span>
@@ -2553,26 +2553,26 @@ def render_sidebar():
             </div>
             <div style="font-family:var(--font-mono); font-size:10px; color:var(--text-muted);
                         letter-spacing:2px; text-transform:uppercase; margin-top:2px;">
-                Configuration
+                Configuración
             </div>
         </div>
         """, unsafe_allow_html=True)
 
         st.markdown("---")
 
-        ticker = st.text_input("TICKER", value="SPY", help="e.g. SPY, QQQ, AAPL, TSLA, NVDA").upper()
+        ticker = st.text_input("TICKER", value="SPY", help="Ej: SPY, QQQ, AAPL, TSLA, NVDA").upper()
 
-        st.markdown("##### Analysis Parameters")
-        strike_range = st.slider("Strike Range (%)", 5, 50, 10, 5)
-        max_exp_days = st.slider("Max Expiry (days)", 7, 180, 60, 7)
-        min_oi = st.number_input("Min Open Interest", 0, 10000, 500, 100)
+        st.markdown("##### Parámetros de Análisis")
+        strike_range = st.slider("Rango de Strikes (%)", 5, 50, 10, 5)
+        max_exp_days = st.slider("Vencimiento Máx. (días)", 7, 180, 60, 7)
+        min_oi = st.number_input("OI Mínimo", 0, 10000, 500, 100)
 
-        st.markdown("##### Expiry Filter")
-        expiry_filter = st.selectbox("Focus", ["All Expirations", "0DTE Only", "≤ 7 DTE", "≤ 30 DTE"],
-            help="Filter options by time to expiry. 0DTE = same-day expiry only.")
+        st.markdown("##### Filtro de Vencimiento")
+        expiry_filter = st.selectbox("Enfoque", ["Todos los Vencimientos", "Solo 0DTE", "≤ 7 DTE", "≤ 30 DTE"],
+            help="Filtra opciones por tiempo al vencimiento. 0DTE = solo expiraciones del día.")
 
-        st.markdown("##### Dealer Positioning")
-        dealer = st.selectbox("Assumption", ["standard", "inverse", "neutral"],
+        st.markdown("##### Posicionamiento del Dealer")
+        dealer = st.selectbox("Modelo", ["standard", "inverse", "neutral"],
             format_func=lambda x: {
                 "standard": "Standard (Short Puts, Long Calls)",
                 "inverse": "Inverse (Long Puts, Short Calls)",
@@ -2581,15 +2581,15 @@ def render_sidebar():
 
         st.markdown("---")
 
-        st.markdown("##### Price Chart")
-        price_days = st.slider("Lookback (days)", 5, 90, 30, 5,
-            help="Historical price data from Yahoo Finance (stock OHLCV only)")
+        st.markdown("##### Gráfico de Precio")
+        price_days = st.slider("Histórico (días)", 5, 90, 30, 5,
+            help="Datos históricos de precio de Yahoo Finance (solo OHLCV del subyacente)")
 
         # Compare tickers
-        st.markdown("##### Multi-Ticker Compare")
-        compare_input = st.text_input("Add tickers (comma-separated)", placeholder="QQQ, AAPL, TSLA")
+        st.markdown("##### Comparar Tickers")
+        compare_input = st.text_input("Añadir tickers (separados por coma)", placeholder="QQQ, AAPL, TSLA")
 
-        analyze = st.button("⚡ ANALYZE", use_container_width=True, type="primary")
+        analyze = st.button("⚡ ANALIZAR", use_container_width=True, type="primary")
 
         st.markdown("---")
         st.markdown("""
@@ -2641,39 +2641,39 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
         if metrics["total_gex"] > 0:
             st.markdown(f"""
             <div class="glass-card">
-                <div style="color:#00FF88; font-weight:700; font-size:15px; margin-bottom:8px;">⬢ POSITIVE GAMMA REGIME</div>
+                <div style="color:#00FF88; font-weight:700; font-size:15px; margin-bottom:8px;">⬢ RÉGIMEN GAMMA POSITIVA</div>
                 <div style="color:var(--text-secondary); font-size:13px; line-height:1.7;">
-                    Dealers are <b style="color:#E8ECF4;">long gamma</b> — they sell into rallies & buy dips.<br/>
-                    Expect <b style="color:#00FF88;">compressed volatility</b> and mean-reverting price action.<br/>
-                    Support/resistance levels are more likely to hold.
+                    Los dealers están <b style="color:#E8ECF4;">largos de gamma</b> — venden en subidas y compran en caídas.<br/>
+                    Esperar <b style="color:#00FF88;">volatilidad comprimida</b> y acción de precio con reversión a la media.<br/>
+                    Los niveles de soporte/resistencia tienden a mantenerse.
                 </div>
             </div>
             """, unsafe_allow_html=True)
         else:
             st.markdown(f"""
             <div class="glass-card">
-                <div style="color:#FF4466; font-weight:700; font-size:15px; margin-bottom:8px;">⬡ NEGATIVE GAMMA REGIME</div>
+                <div style="color:#FF4466; font-weight:700; font-size:15px; margin-bottom:8px;">⬡ RÉGIMEN GAMMA NEGATIVA</div>
                 <div style="color:var(--text-secondary); font-size:13px; line-height:1.7;">
-                    Dealers are <b style="color:#E8ECF4;">short gamma</b> — they chase momentum in both directions.<br/>
-                    Expect <b style="color:#FF4466;">amplified volatility</b> and trending moves.<br/>
-                    Breakouts are more likely to sustain.
+                    Los dealers están <b style="color:#E8ECF4;">cortos de gamma</b> — persiguen el momentum en ambas direcciones.<br/>
+                    Esperar <b style="color:#FF4466;">volatilidad amplificada</b> y movimientos tendenciales.<br/>
+                    Las rupturas de rango tienden a persistir.
                 </div>
             </div>
             """, unsafe_allow_html=True)
 
     with col_r:
-        direction = "BULLISH" if max_pain > spot else "BEARISH" if max_pain < spot else "AT EQUILIBRIUM"
+        direction = "ALCISTA" if max_pain > spot else "BAJISTA" if max_pain < spot else "EN EQUILIBRIO"
         d_color = "#00FF88" if max_pain > spot else "#FF4466" if max_pain < spot else "#FFD700"
-        speed = "slow (mean-reversion)" if metrics["total_gex"] > 0 else "fast (momentum-driven)"
+        speed = "lento (reversión media)" if metrics["total_gex"] > 0 else "rápido (momentum)"
         st.markdown(f"""
         <div class="glass-card">
             <div style="color:{d_color}; font-weight:700; font-size:15px; margin-bottom:8px;">
                 {'↑' if max_pain > spot else '↓' if max_pain < spot else '='} MAX PAIN: {direction}
             </div>
             <div style="color:var(--text-secondary); font-size:13px; line-height:1.7;">
-                Target: <b style="color:#E8ECF4;">${max_pain:.2f}</b> ({(max_pain-spot)/spot*100:+.2f}%)<br/>
-                Expected move speed: <b style="color:#E8ECF4;">{speed}</b><br/>
-                IV-implied range: <b style="color:#E8ECF4;">±{prob['expected_move']:.2f}%</b> ({metrics['days_to_expiry']}d)
+                Objetivo: <b style="color:#E8ECF4;">${max_pain:.2f}</b> ({(max_pain-spot)/spot*100:+.2f}%)<br/>
+                Velocidad movimiento esperado: <b style="color:#E8ECF4;">{speed}</b><br/>
+                Rango implícito por IV: <b style="color:#E8ECF4;">±{prob['expected_move']:.2f}%</b> ({metrics['days_to_expiry']}d)
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -2682,14 +2682,14 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
 
     # ── Tabs ──
     tabs = st.tabs([
-        "📉 Price & Levels",
+        "📉 Precio y Niveles",
         "🎯 Max Pain",
-        "📊 GEX Analysis",
-        "📈 Gamma Profile",
-        "🎮 Scenario Sim",
-        "⚡ DEX & Greeks",
-        "🌊 3D Surfaces",
-        "📋 Data",
+        "📊 Análisis GEX",
+        "📈 Perfil Gamma",
+        "🎮 Simulador",
+        "⚡ DEX y Griegas",
+        "🌊 Superficies 3D",
+        "📋 Datos",
     ])
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2710,10 +2710,10 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
 
         # ── Expected Move Panel ──
         em = expected_move
-        st.markdown("##### Expected Move")
+        st.markdown("##### Movimiento Esperado")
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            st.metric("ATM IV", f"{em['atm_iv']*100:.1f}%")
+            st.metric("IV ATM", f"{em['atm_iv']*100:.1f}%")
         with c2:
             st.metric(f"±1σ ({em['dte']}d)", f"${em['em_1sigma']:.2f}",
                       delta=f"±{em['em_1sigma_pct']:.2f}%")
@@ -2721,15 +2721,15 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
             st.metric(f"±2σ ({em['dte']}d)", f"${em['em_2sigma']:.2f}",
                       delta=f"±{em['em_2sigma_pct']:.2f}%")
         with c4:
-            st.metric("Range", f"${em['lower_1s']:.2f} — ${em['upper_1s']:.2f}")
+            st.metric("Rango", f"${em['lower_1s']:.2f} — ${em['upper_1s']:.2f}")
 
         # ── Call & Put Walls ──
         st.markdown("---")
-        st.markdown("##### Call & Put Walls")
+        st.markdown("##### Muros de Calls y Puts")
         wc1, wc2 = st.columns(2)
         with wc1:
             st.markdown("""
-            <div style="color:#00FF88; font-weight:700; font-size:13px; margin-bottom:8px;">📗 CALL WALLS (Resistance)</div>
+            <div style="color:#00FF88; font-weight:700; font-size:13px; margin-bottom:8px;">📗 MUROS DE CALLS (Resistencia)</div>
             """, unsafe_allow_html=True)
             for w in walls["call_walls"][:5]:
                 bar_w = min(100, w["oi"] / max(walls["call_walls"][0]["oi"], 1) * 100)
@@ -2748,7 +2748,7 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
 
         with wc2:
             st.markdown("""
-            <div style="color:#FF4466; font-weight:700; font-size:13px; margin-bottom:8px;">📕 PUT WALLS (Support)</div>
+            <div style="color:#FF4466; font-weight:700; font-size:13px; margin-bottom:8px;">📕 MUROS DE PUTS (Soporte)</div>
             """, unsafe_allow_html=True)
             for w in walls["put_walls"][:5]:
                 bar_w = min(100, w["oi"] / max(walls["put_walls"][0]["oi"], 1) * 100)
@@ -2768,27 +2768,27 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
         # ── 0DTE Panel ──
         if dte0_metrics:
             st.markdown("---")
-            st.markdown("##### ⚡ 0DTE Dashboard")
+            st.markdown("##### ⚡ Dashboard 0DTE")
             z = dte0_metrics
             total_gex_abs = abs(metrics["total_gex"])
             pct_0dte = abs(z["gex"]) / total_gex_abs * 100 if total_gex_abs > 0 else 0
 
             c1, c2, c3, c4, c5 = st.columns(5)
             with c1:
-                st.metric("0DTE GEX", f"${z['gex']:.3f}B")
+                st.metric("GEX 0DTE", f"${z['gex']:.3f}B")
             with c2:
-                st.metric("0DTE DEX", f"${z['dex']:.3f}B")
+                st.metric("DEX 0DTE", f"${z['dex']:.3f}B")
             with c3:
-                st.metric("% of Total", f"{pct_0dte:.1f}%")
+                st.metric("% del Total", f"{pct_0dte:.1f}%")
             with c4:
-                st.metric("0DTE Call OI", f"{z['call_oi']:,}")
+                st.metric("OI Calls 0DTE", f"{z['call_oi']:,}")
             with c5:
-                st.metric("0DTE Put OI", f"{z['put_oi']:,}")
+                st.metric("OI Puts 0DTE", f"{z['put_oi']:,}")
 
             st.markdown(f"""
             <div class="glass-card" style="margin-top:8px;">
                 <div style="color:var(--text-secondary); font-size:12px; line-height:1.7;">
-                    {'<b style="color:#FFD700;">⚡ High 0DTE concentration</b> — intraday gamma effects amplified. Watch for pin to <b style="color:#E8ECF4;">$' + f"{z['top_strike']:.0f}" + '</b> (max 0DTE GEX strike).' if pct_0dte > 30 else '<b style="color:var(--text-muted);">0DTE gamma is moderate</b> — multi-day expirations dominate positioning.'}
+                    {'<b style="color:#FFD700;">⚡ Alta concentración 0DTE</b> — efectos gamma intradía amplificados. Vigilar pin hacia <b style="color:#E8ECF4;">$' + f"{z['top_strike']:.0f}" + '</b> (strike de máximo GEX 0DTE).' if pct_0dte > 30 else '<b style="color:var(--text-muted);">Gamma 0DTE moderada</b> — vencimientos de varios días dominan el posicionamiento.'}
                 </div>
             </div>
             """, unsafe_allow_html=True)
@@ -2804,7 +2804,7 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
 
         if available_expiries:
             selected_idx = st.selectbox(
-                "Select Expiration",
+                "Seleccionar Vencimiento",
                 range(len(available_expiries)),
                 format_func=lambda i: expiry_labels[i],
                 index=0,
@@ -2821,18 +2821,18 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
                 use_container_width=True,
             )
 
-            st.markdown("#### Pin Probability Analysis")
+            st.markdown("#### Análisis de Probabilidad de Pinning")
             dte_sel = max(0, (sel_expiry - pd.Timestamp.now()).days)
             prob_sel = calculate_pinning_probability(mp_sel, spot, metrics["total_gex"],
                                                      dte_sel, metrics["iv_mean"])
             render_probability_panel(prob_sel, mp_sel, spot, {**metrics, "days_to_expiry": dte_sel})
         else:
-            st.warning("No expiration dates available.")
+            st.warning("No hay fechas de vencimiento disponibles.")
 
         # Term structure
         if mp_term_structure:
             st.markdown("---")
-            st.markdown("##### Max Pain Term Structure")
+            st.markdown("##### Estructura Temporal de Max Pain")
             st.plotly_chart(chart_max_pain_term_structure(mp_term_structure, spot), use_container_width=True)
 
             # Term structure table
@@ -2862,7 +2862,7 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
         st.plotly_chart(chart_gex_by_strike(spot, data, strike_range), use_container_width=True)
 
         # Top strikes table
-        st.markdown("##### Top GEX Strikes")
+        st.markdown("##### Strikes con Mayor GEX")
         top_cols = st.columns(5)
         for i, (strike_val, gex_val) in enumerate(metrics["top_strikes"].items()):
             if i >= 5:
@@ -2889,7 +2889,7 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
         # Cumulative GEX + Period breakdown
         st.plotly_chart(chart_cumulative_gex(data), use_container_width=True)
 
-        st.markdown("##### GEX by Period")
+        st.markdown("##### GEX por Período")
         dtemp = data.copy()
         dtemp["d"] = (dtemp["expiration"] - datetime.now()).dt.days
         periods = {"0-7d": (0, 7), "7-30d": (7, 30), "30-60d": (30, 60), "60-90d": (60, 90), "90d+": (90, 999)}
@@ -2934,7 +2934,7 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
 
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown("##### Support / Resistance from Gamma Peaks")
+            st.markdown("##### Soporte / Resistencia por Picos de Gamma")
             gamma_arr = profiles["aggregate_gamma"]
             strikes_arr = profiles["strikes"]
             peaks = []
@@ -2944,10 +2944,10 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
             peaks.sort(key=lambda x: abs(x[1]), reverse=True)
             if peaks:
                 for s_val, g_val in peaks[:5]:
-                    icon = "🟢 Support" if g_val > 0 else "🔴 Resistance"
+                    icon = "🟢 Soporte" if g_val > 0 else "🔴 Resistencia"
                     st.markdown(f"**{icon}** @ ${s_val:.2f} — {abs(g_val):.3f}B")
             else:
-                st.markdown("*No significant gamma peaks detected in range.*")
+                st.markdown("*No se detectaron picos gamma significativos en el rango.*")
 
             # Gamma profile interpretation (from original)
             max_gamma = max(gamma_arr)
@@ -2956,18 +2956,18 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
             if max_gamma > abs(min_gamma):
                 st.markdown(f"""
                 <div class="glass-card">
-                    <div style="color:#00FF88; font-weight:600; font-size:13px;">Positive Gamma Dominant</div>
+                    <div style="color:#00FF88; font-weight:600; font-size:13px;">Gamma Positiva Dominante</div>
                     <div style="color:var(--text-secondary); font-size:12px; margin-top:4px;">
-                        Market tends toward stability. Mean reversion expected. Compressed volatility.
+                        Mercado tiende a la estabilidad. Se espera reversión a la media. Volatilidad comprimida.
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
             else:
                 st.markdown(f"""
                 <div class="glass-card">
-                    <div style="color:#FF4466; font-weight:600; font-size:13px;">Negative Gamma Dominant</div>
+                    <div style="color:#FF4466; font-weight:600; font-size:13px;">Gamma Negativa Dominante</div>
                     <div style="color:var(--text-secondary); font-size:12px; margin-top:4px;">
-                        Market prone to sharp moves. Range breakouts likely. Expanded volatility.
+                        Mercado propenso a movimientos bruscos. Rupturas de rango probables. Volatilidad expandida.
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -2989,19 +2989,19 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
         st.plotly_chart(chart_dex_by_strike(spot, data, strike_range), use_container_width=True)
         c1, c2, c3 = st.columns(3)
         with c1:
-            st.metric("Net DEX", f"${metrics['total_dex']:.3f}B")
+            st.metric("DEX Neto", f"${metrics['total_dex']:.3f}B")
         with c2:
-            st.metric("Call DEX", f"${metrics['call_dex']:.3f}B")
+            st.metric("DEX Calls", f"${metrics['call_dex']:.3f}B")
         with c3:
-            st.metric("Put DEX", f"${metrics['put_dex']:.3f}B")
+            st.metric("DEX Puts", f"${metrics['put_dex']:.3f}B")
 
         st.markdown("""
         <div class="glass-card" style="margin:16px 0;">
             <div style="color:var(--text-secondary); font-size:13px; line-height:1.7;">
-                <b style="color:var(--text-primary);">Delta Exposure (DEX)</b> — directional hedging pressure from dealers.<br/>
-                <b style="color:#4488FF;">Positive DEX</b> → upward pressure (dealers buy as price rises) &nbsp;|&nbsp;
-                <b style="color:#FF8C42;">Negative DEX</b> → downward pressure (dealers sell as price falls)<br/>
-                Combine with GEX: <b>GEX</b> = volatility regime, <b>DEX</b> = directional bias.
+                <b style="color:var(--text-primary);">Delta Exposure (DEX)</b> — presión direccional de cobertura de los dealers.<br/>
+                <b style="color:#4488FF;">DEX Positivo</b> → presión alcista (dealers compran al subir el precio) &nbsp;|&nbsp;
+                <b style="color:#FF8C42;">DEX Negativo</b> → presión bajista (dealers venden al caer el precio)<br/>
+                Combinar con GEX: <b>GEX</b> = régimen de volatilidad, <b>DEX</b> = sesgo direccional.
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -3012,10 +3012,10 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
         st.markdown("""
         <div class="glass-card">
             <div style="color:var(--text-secondary); font-size:13px; line-height:1.7;">
-                <b style="color:#A855F7;">Vanna</b> = sensitivity of delta to IV changes.
-                When IV drops, vanna flows push dealers to buy (positive) or sell (negative).<br/>
-                <b style="color:#00BFA6;">Charm</b> = delta decay over time.
-                Shows how hedging pressure shifts as time passes — critical for OPEX dynamics.
+                <b style="color:#A855F7;">Vanna</b> = sensibilidad del delta a cambios de IV.
+                Cuando la IV cae, los flujos de vanna empujan a los dealers a comprar (+) o vender (−).<br/>
+                <b style="color:#00BFA6;">Charm</b> = decaimiento del delta en el tiempo.
+                Muestra cómo cambia la presión de cobertura con el tiempo — crítico para dinámicas de OPEX.
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -3025,27 +3025,27 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     with tabs[6]:
         surface_mode = st.radio(
-            "Surface Type", ["Implied Volatility", "Gamma Exposure (GEX)"],
+            "Tipo de Superficie", ["Volatilidad Implícita", "Exposición Gamma (GEX)"],
             horizontal=True, label_visibility="collapsed"
         )
 
-        if surface_mode == "Implied Volatility":
+        if surface_mode == "Volatilidad Implícita":
             c1, c2, c3, c4 = st.columns(4)
             with c1:
-                st.metric("IV Mean", f"{metrics['iv_mean']*100:.1f}%")
+                st.metric("IV Media", f"{metrics['iv_mean']*100:.1f}%")
             with c2:
-                st.metric("Call IV", f"{metrics['iv_calls']*100:.1f}%")
+                st.metric("IV Calls", f"{metrics['iv_calls']*100:.1f}%")
             with c3:
-                st.metric("Put IV", f"{metrics['iv_puts']*100:.1f}%")
+                st.metric("IV Puts", f"{metrics['iv_puts']*100:.1f}%")
             with c4:
                 skew = metrics["iv_skew"] * 100
-                st.metric("IV Skew", f"{skew:+.1f}%",
-                          delta="Put Premium" if skew > 0 else "Call Premium",
+                st.metric("Sesgo IV", f"{skew:+.1f}%",
+                          delta="Prima Put" if skew > 0 else "Prima Call",
                           delta_color="inverse" if skew > 0 else "normal")
 
             st.markdown("""
             <div style="color:var(--text-muted); font-size:12px; margin-bottom:4px; font-family:var(--font-mono);">
-                🖱️ Drag to orbit · Scroll to zoom · Hover for IV values
+                🖱️ Arrastra para orbitar · Scroll para zoom · Hover para ver IV
             </div>
             """, unsafe_allow_html=True)
             render_3d_iv_surface(data, spot, strike_range, metrics)
@@ -3054,15 +3054,15 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
             c1, c2, c3 = st.columns(3)
             with c1:
                 total_gex = metrics.get("total_gex", 0)
-                st.metric("Net GEX", f"${total_gex:.3f}B")
+                st.metric("GEX Neto", f"${total_gex:.3f}B")
             with c2:
-                st.metric("Call GEX", f"${metrics.get('call_gex', 0):.3f}B")
+                st.metric("GEX Calls", f"${metrics.get('call_gex', 0):.3f}B")
             with c3:
-                st.metric("Put GEX", f"${metrics.get('put_gex', 0):.3f}B")
+                st.metric("GEX Puts", f"${metrics.get('put_gex', 0):.3f}B")
 
             st.markdown("""
             <div style="color:var(--text-muted); font-size:12px; margin-bottom:4px; font-family:var(--font-mono);">
-                🖱️ Drag to orbit · Scroll to zoom · Hover for GEX values · Green = +γ (stabilizing) · Red = -γ (amplifying)
+                🖱️ Arrastra para orbitar · Scroll para zoom · Hover para ver GEX · Verde = +γ (estabiliza) · Rojo = -γ (amplifica)
             </div>
             """, unsafe_allow_html=True)
             render_3d_gex_surface(data, spot, strike_range, metrics)
@@ -3071,14 +3071,14 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
     # TAB 7 — DATA (table + CSV download)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     with tabs[7]:
-        st.markdown("##### Options Data")
+        st.markdown("##### Datos de Opciones")
         c1, c2, c3 = st.columns(3)
         with c1:
-            type_f = st.selectbox("Type", ["All", "Calls", "Puts"])
+            type_f = st.selectbox("Tipo", ["Todos", "Calls", "Puts"])
         with c2:
-            sort_f = st.selectbox("Sort by", ["GEX", "DEX", "open_interest", "volume", "strike", "iv"])
+            sort_f = st.selectbox("Ordenar por", ["GEX", "DEX", "open_interest", "volume", "strike", "iv"])
         with c3:
-            n_rows = st.number_input("Rows", 10, 100, 25)
+            n_rows = st.number_input("Filas", 10, 100, 25)
 
         ddf = data.copy()
         if type_f == "Calls":
@@ -3100,7 +3100,7 @@ def display_results(ticker, spot, data, strike_range, max_exp_days, dealer, pric
         st.dataframe(show_df, use_container_width=True, height=500)
 
         csv = ddf.to_csv(index=False)
-        st.download_button("⬇ Download CSV", data=csv,
+        st.download_button("⬇ Descargar CSV", data=csv,
                           file_name=f"{ticker}_gex_pro_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
                           mime="text/csv")
 
@@ -3110,10 +3110,10 @@ def show_landing():
     st.markdown("""
     <div class="glass-card" style="text-align:center; padding:40px;">
         <div style="font-size:64px; margin-bottom:16px;">⚡</div>
-        <div class="hero-title" style="font-size:36px;">Professional Options Flow Analysis</div>
+        <div class="hero-title" style="font-size:36px;">Análisis Profesional de Flujo de Opciones</div>
         <div style="color:var(--text-secondary); font-size:15px; margin-top:12px; max-width:600px; margin-left:auto; margin-right:auto; line-height:1.7;">
-            Analyze Gamma Exposure, Delta Exposure, Max Pain, Vanna & Charm
-            across the entire options chain — powered by free CBOE data.
+            Analiza Exposición Gamma, Delta, Max Pain, Vanna y Charm
+            en toda la cadena de opciones — con datos CBOE gratuitos.
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -3122,12 +3122,12 @@ def show_landing():
 
     cols = st.columns(3)
     cards = [
-        ("GEX", "#00D9FF", "Gamma Exposure reveals how dealer hedging creates support/resistance levels and determines the volatility regime.",
-         "GEX > 0 → Stability  ·  GEX < 0 → Volatility"),
-        ("Max Pain", "#00FF88", "The strike where most options expire worthless. Acts as a price magnet, especially near OPEX.",
-         "0DTE → Strong Pin  ·  30d+ → Weak Signal"),
-        ("DEX + Vanna", "#FE53BB", "Delta Exposure shows directional pressure. Vanna shows how IV changes affect hedging flows.",
-         "DEX → Direction  ·  Vanna → IV Sensitivity"),
+        ("GEX", "#00D9FF", "La Exposición Gamma revela cómo la cobertura de dealers crea niveles de soporte/resistencia y determina el régimen de volatilidad.",
+         "GEX > 0 → Estabilidad  ·  GEX < 0 → Volatilidad"),
+        ("Max Pain", "#00FF88", "El strike donde más opciones expiran sin valor. Actúa como imán de precio, especialmente cerca de OPEX.",
+         "0DTE → Pin fuerte  ·  30d+ → Señal débil"),
+        ("DEX + Vanna", "#FE53BB", "Delta Exposure muestra presión direccional. Vanna muestra cómo los cambios de IV afectan los flujos de cobertura.",
+         "DEX → Dirección  ·  Vanna → Sensibilidad IV"),
     ]
 
     for i, (title, color, desc, hint) in enumerate(cards):
@@ -3148,34 +3148,34 @@ def show_landing():
 
     st.markdown("")
 
-    with st.expander("📖 How to Use This Tool", expanded=False):
+    with st.expander("📖 Cómo Usar Esta Herramienta", expanded=False):
         st.markdown("""
-        **1. Enter a ticker** — SPY, QQQ, AAPL, TSLA, etc.
+        **1. Introduce un ticker** — SPY, QQQ, AAPL, TSLA, etc.
 
-        **2. Configure parameters** — Adjust strike range, expiry window, and minimum OI.
+        **2. Configura parámetros** — Ajusta rango de strikes, ventana de vencimiento y OI mínimo.
 
-        **3. Analyze the dashboard:**
-        - **Key Levels Bar** — Spot, Max Pain, Gamma Flip, Max GEX Strike at a glance
-        - **Regime Badge** — Instantly see if we're in positive or negative gamma
-        - **Max Pain Tab** — Direction and pin probability with IV-enhanced model
-        - **Gamma Profile** — Full exposure curve with support/resistance identification
-        - **3D Terrain** — Interactive Three.js visualization of the gamma surface
-        - **Heatmap** — Strike × Expiry concentration map
-        - **DEX** — Directional hedging pressure from delta exposure
-        - **IV Surface** — Volatility smile across expirations
-        - **Vanna & Charm** — Second-order greek exposures for OPEX dynamics
+        **3. Analiza el dashboard:**
+        - **Barra de Niveles Clave** — Spot, Max Pain, Gamma Flip, Strike Max GEX de un vistazo
+        - **Indicador de Régimen** — Ver al instante si estamos en gamma positiva o negativa
+        - **Pestaña Max Pain** — Dirección y probabilidad de pinning con modelo mejorado por IV
+        - **Perfil Gamma** — Curva completa de exposición con identificación de soporte/resistencia
+        - **Terreno 3D** — Visualización interactiva Three.js de la superficie gamma
+        - **Mapa de Calor** — Mapa de concentración Strike × Vencimiento
+        - **DEX** — Presión direccional de cobertura por exposición delta
+        - **Superficie IV** — Smile de volatilidad a lo largo de los vencimientos
+        - **Vanna y Charm** — Exposición de griegas de segundo orden para dinámicas de OPEX
 
-        **4. Best Practices:**
-        - 0DTE/weekly expiries: Max pain is most effective
-        - Gamma Flip: Critical level where market behavior changes
-        - GEX + DEX combined: Full picture of dealer positioning
-        - IV Skew > 0: Put premium = downside hedging demand
+        **4. Buenas Prácticas:**
+        - Vencimientos 0DTE/semanales: Max pain es más efectivo
+        - Gamma Flip: Nivel crítico donde cambia el comportamiento del mercado
+        - GEX + DEX combinados: Visión completa del posicionamiento de dealers
+        - IV Skew > 0: Prima de puts = demanda de cobertura bajista
         """)
 
     st.markdown("""
     <div style="text-align:center; margin-top:40px; padding:20px;">
         <div style="font-family:var(--font-mono); font-size:11px; color:var(--text-muted); letter-spacing:2px;">
-            BUILT FOR THE QUANTITATIVE TRADING COMMUNITY
+            CREADO PARA LA COMUNIDAD DE TRADING CUANTITATIVO
         </div>
         <div style="margin-top:8px;">
             <a href="https://bquantfinance.com" style="color:var(--accent-cyan); text-decoration:none;
@@ -3193,10 +3193,10 @@ def show_landing():
 # ═══════════════════════════════════════════════════════════════════════════════
 def apply_expiry_filter(data: pd.DataFrame, expiry_filter: str) -> pd.DataFrame:
     """Apply expiry filter to options data"""
-    if expiry_filter == "All Expirations":
+    if expiry_filter == "Todos los Vencimientos":
         return data
     today = pd.Timestamp.now().normalize()
-    if expiry_filter == "0DTE Only":
+    if expiry_filter == "Solo 0DTE":
         return data[data["expiration"].dt.normalize() == today]
     elif expiry_filter == "≤ 7 DTE":
         cutoff = today + timedelta(days=7)
@@ -3245,11 +3245,11 @@ def main():
                         # Apply expiry filter
                         filtered = apply_expiry_filter(odata, expiry_filter)
                         if filtered.empty:
-                            st.warning(f"No options match '{expiry_filter}' filter. Showing all expirations.")
+                            st.warning(f"No hay opciones con el filtro '{expiry_filter}'. Mostrando todos los vencimientos.")
                             filtered = odata
 
-                        if expiry_filter != "All Expirations":
-                            st.info(f"🔍 Showing: **{expiry_filter}** ({len(filtered):,} contracts)")
+                        if expiry_filter != "Todos los Vencimientos":
+                            st.info(f"🔍 Mostrando: **{expiry_filter}** ({len(filtered):,} contratos)")
 
                         display_results(ticker, spot, filtered, strike_range, max_exp_days, dealer, price_days)
 
@@ -3309,7 +3309,7 @@ def main():
                                 st.dataframe(fmt_df, use_container_width=True, hide_index=True)
                     else:
                         progress.empty(); status.empty()
-                        st.error("No valid data after filtering. Try reducing minimum OI.")
+                        st.error("No hay datos válidos tras filtrar. Prueba reduciendo el OI mínimo.")
                 else:
                     progress.empty(); status.empty()
                     st.error("No options data found.")
@@ -3326,8 +3326,8 @@ def main():
         filtered = apply_expiry_filter(td["data"], expiry_filter)
         if filtered.empty:
             filtered = td["data"]
-        if expiry_filter != "All Expirations":
-            st.info(f"🔍 Showing: **{expiry_filter}** ({len(filtered):,} contracts)")
+        if expiry_filter != "Todos los Vencimientos":
+            st.info(f"🔍 Mostrando: **{expiry_filter}** ({len(filtered):,} contratos)")
         display_results(td["ticker"], td["spot"], filtered, strike_range, max_exp_days,
                        td.get("dealer", "standard"), price_days)
     else:
