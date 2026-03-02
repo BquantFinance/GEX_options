@@ -1882,7 +1882,7 @@ def render_3d_iv_surface(data: pd.DataFrame, spot: float, strike_range: float, m
 
 
 def render_3d_gex_surface(data: pd.DataFrame, spot: float, strike_range: float, metrics: dict):
-    """3D GEX Surface (Strike × Expiry × GEX$) — Three.js"""
+    """3D GEX Surface (Strike x Expiry x GEX$) — Three.js — flat array approach"""
     lo, hi = spot * (1 - strike_range / 100), spot * (1 + strike_range / 100)
     df = data[(data["strike"] >= lo) & (data["strike"] <= hi)].copy()
     df["dte"] = (df["expiration"] - pd.Timestamp.now()).dt.days
@@ -1892,14 +1892,14 @@ def render_3d_gex_surface(data: pd.DataFrame, spot: float, strike_range: float, 
         st.warning("Datos de GEX insuficientes para la superficie 3D.")
         return
 
-    # Build rows per expiration (mirrors IV surface approach)
+    # Build rows per expiration — same approach as working IV surface
     rows = []
     for exp in df["expiration"].unique():
         edf = df[df["expiration"] == exp]
         dte = int(edf["dte"].iloc[0])
         gex_by_strike = edf.groupby("strike")["GEX"].sum()
-        for strike, gex_val in gex_by_strike.items():
-            rows.append({"strike": float(strike), "dte": dte, "gex": float(gex_val) / 1e6})
+        for strike_val, gex_val in gex_by_strike.items():
+            rows.append({"strike": float(strike_val), "dte": dte, "gex": float(gex_val) / 1e6})
 
     if not rows:
         st.warning("Datos insuficientes para la superficie GEX 3D.")
@@ -1919,22 +1919,23 @@ def render_3d_gex_surface(data: pd.DataFrame, spot: float, strike_range: float, 
     gex_df["s_bin"] = pd.cut(gex_df["strike"], bins=strike_bins, labels=strike_bins[:-1], include_lowest=True).astype(float)
     gex_df["d_bin"] = pd.cut(gex_df["dte"], bins=dte_bins, labels=dte_bins[:-1], include_lowest=True).astype(float)
     pv = gex_df.pivot_table(values="gex", index="s_bin", columns="d_bin", aggfunc="sum")
-    pv = pv.loc[pv.index.notna(), pv.columns.notna()]  # drop NaN indices
+    pv = pv.loc[pv.index.notna(), pv.columns.notna()]
     pv = pv.interpolate(axis=0, limit=2).interpolate(axis=1, limit=2).fillna(0)
 
     if pv.shape[0] < 3 or pv.shape[1] < 2:
         st.warning("Datos insuficientes para la superficie GEX 3D.")
         return
 
-    strikes_list = [float(s) for s in pv.index]
-    dtes_list = [float(d) for d in pv.columns]
+    strikes_list = [round(float(s), 2) for s in pv.index]
+    dtes_list = [round(float(d), 2) for d in pv.columns]
     nS = len(strikes_list)
     nD = len(dtes_list)
 
-    grid = []
-    for si, sv in enumerate(strikes_list):
-        for di, dv in enumerate(dtes_list):
-            grid.append({"s": sv, "d": dv, "gex": round(float(pv.iloc[si, di]), 3)})
+    # FLAT ARRAY — indexed as flat[j * nS + i] — avoids dict lookup precision issues
+    flat_gex = []
+    for j in range(nD):
+        for i in range(nS):
+            flat_gex.append(round(float(pv.iloc[i, j]), 3))
 
     gex_abs_max = max(abs(pv.max().max()), abs(pv.min().min()), 0.001)
 
@@ -1946,7 +1947,7 @@ def render_3d_gex_surface(data: pd.DataFrame, spot: float, strike_range: float, 
     dt_labels = [{"i": i, "v": int(dtes_list[i])} for i in dt_idx]
 
     json_data = json.dumps({
-        "grid": grid, "spot": spot, "nS": nS, "nD": nD,
+        "flat": flat_gex, "spot": spot, "nS": nS, "nD": nD,
         "strikes": strikes_list, "dtes": dtes_list,
         "stkLabels": stk_labels, "dtLabels": dt_labels,
         "gexMax": round(gex_abs_max, 3),
@@ -1966,7 +1967,7 @@ def render_3d_gex_surface(data: pd.DataFrame, spot: float, strike_range: float, 
     .hud-c{{background:rgba(6,9,15,0.82);backdrop-filter:blur(20px);
       border:1px solid rgba(0,217,255,0.1);border-radius:14px;
       padding:14px 20px;color:#7A8BA8;font-size:11px;min-width:180px;
-      box-shadow:0 8px 32px rgba(0,0,0,0.4),0 0 60px rgba(0,217,255,0.03)}}
+      box-shadow:0 8px 32px rgba(0,0,0,0.4),0 0 60px rgba(0,217,255,0.03),inset 0 1px 0 rgba(255,255,255,0.03)}}
     .hud-t{{font-size:18px;font-weight:700;letter-spacing:-0.5px;margin-bottom:8px;
       background:linear-gradient(135deg,#00FF88,#00D9FF 60%,#FE53BB);
       -webkit-background-clip:text;-webkit-text-fill-color:transparent}}
@@ -1977,14 +1978,15 @@ def render_3d_gex_surface(data: pd.DataFrame, spot: float, strike_range: float, 
     .ctr button{{background:rgba(11,17,32,0.8);backdrop-filter:blur(12px);
       border:1px solid rgba(0,217,255,0.12);color:#7A8BA8;
       padding:7px 16px;border-radius:20px;font-size:10px;cursor:pointer;
-      font-family:inherit;transition:all .25s}}
-    .ctr button:hover{{border-color:rgba(0,217,255,0.35);color:#E8ECF4}}
+      font-family:inherit;transition:all .25s;letter-spacing:0.3px}}
+    .ctr button:hover{{border-color:rgba(0,217,255,0.35);color:#E8ECF4;
+      box-shadow:0 0 15px rgba(0,217,255,0.08)}}
     .ctr button.on{{background:rgba(0,217,255,0.1);color:#00D9FF;border-color:rgba(0,217,255,0.25)}}
     #tip{{position:absolute;display:none;z-index:20;pointer-events:none;
       background:rgba(6,9,15,0.92);backdrop-filter:blur(16px);
       border:1px solid rgba(0,217,255,0.2);border-radius:10px;
       padding:10px 14px;font-size:11px;color:#E8ECF4;
-      box-shadow:0 8px 30px rgba(0,0,0,0.5)}}
+      box-shadow:0 8px 30px rgba(0,0,0,0.5),0 0 40px rgba(0,217,255,0.05)}}
     #tip b{{color:#00D9FF}}
     .tip-v{{font-size:18px;font-weight:700;margin:2px 0 4px}}
     .leg{{position:absolute;bottom:14px;left:16px;z-index:10;pointer-events:none;
@@ -2003,35 +2005,35 @@ def render_3d_gex_surface(data: pd.DataFrame, spot: float, strike_range: float, 
       <div class="hud-t">GEX Surface</div>
       <div class="hud-r"><span class="hud-l">Spot</span><span class="hud-v" style="color:#FFD700">${spot:.2f}</span></div>
       <div class="hud-r"><span class="hud-l">GEX Neto</span><span class="hud-v" style="color:{'#00FF88' if metrics.get('total_gex',0)>=0 else '#FF4466'}">{metrics.get('total_gex',0):.3f}B</span></div>
-      <div class="hud-r"><span class="hud-l">Peak</span><span class="hud-v">±{gex_abs_max:.1f}M</span></div>
+      <div class="hud-r"><span class="hud-l">Peak</span><span class="hud-v">&plusmn;{gex_abs_max:.1f}M</span></div>
     </div></div>
     <div class="ctr">
-      <button id="bRot" class="on" onclick="autoRot=!autoRot;this.classList.toggle('on')">⟳ Rotate</button>
-      <button onclick="th=0.6;ph=0.7;rad=26">↺ Reset</button>
-      <button id="bW" class="on" onclick="wire.visible=!wire.visible;this.classList.toggle('on')">◻ Wire</button>
-      <button id="bR" class="on" onclick="refs.visible=!refs.visible;this.classList.toggle('on')">▧ Labels</button>
+      <button id="bRot" class="on" onclick="autoRot=!autoRot;this.classList.toggle('on')">&#x27F3; Rotate</button>
+      <button onclick="th=0.6;ph=0.7;rad=26">&#x21BA; Reset</button>
+      <button id="bW" class="on" onclick="wire.visible=!wire.visible;this.classList.toggle('on')">&#x25FB; Wire</button>
+      <button id="bR" class="on" onclick="refs.visible=!refs.visible;this.classList.toggle('on')">&#x25A7; Labels</button>
     </div>
     <div id="tip"></div>
     <div class="leg">
       <div style="color:#7A8BA8;font-weight:600;letter-spacing:1px">GEX SCALE</div>
       <div class="bar"></div>
       <div style="display:flex;justify-content:space-between"><span style="color:#FF4466">-Put (sell)</span><span style="color:#00FF88">+Call (buy)</span></div>
-      <div style="margin-top:6px;line-height:1.8"><span style="color:#FFD700">◆ Spot</span><br>
-        <span style="color:rgba(255,255,255,0.3)">─ Zero plane</span></div>
+      <div style="margin-top:6px;line-height:1.8"><span style="color:#FFD700">&#x25C6; Spot</span><br>
+        <span style="color:rgba(255,255,255,0.3)">&#x2500; Zero plane</span></div>
     </div>
     <div class="axi">
-      <span style="color:#00D9FF;font-weight:600">X →</span> Strike ($)<br>
-      <span style="color:#FFD700;font-weight:600">Y ↑</span> GEX ($M)<br>
-      <span style="color:#FE53BB;font-weight:600">Z →</span> DTE
+      <span style="color:#00D9FF;font-weight:600">X &#x2192;</span> Strike ($)<br>
+      <span style="color:#FFD700;font-weight:600">Y &#x2191;</span> GEX ($M)<br>
+      <span style="color:#FE53BB;font-weight:600">Z &#x2192;</span> DTE
     </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script>
     const D={json_data};
-    const nS=D.nS,nD=D.nD,W=20,Dep=14,H=10;
-    const lk={{}};D.grid.forEach(p=>{{lk[p.s+','+p.d]=p.gex}});
+    const nS=D.nS, nD=D.nD, W=20, Dep=14, H=10;
     const gM=D.gexMax||1;
-    let autoRot=true,th=0.6,ph=0.7,rad=26,md=false,lx=0,ly=0;
+    const F=D.flat;
+    let autoRot=true, th=0.6, ph=0.7, rad=26, md=false, lx=0, ly=0;
 
     const sc=new THREE.Scene();
     sc.fog=new THREE.FogExp2(0x06090F,0.003);
@@ -2043,35 +2045,48 @@ def render_3d_gex_surface(data: pd.DataFrame, spot: float, strike_range: float, 
     R.shadowMap.enabled=true;
     document.body.appendChild(R.domElement);
 
+    /* ═══ Lights — identical to IV surface ═══ */
     sc.add(new THREE.AmbientLight(0x1a2840,0.6));
     const dL=new THREE.DirectionalLight(0xffffff,0.8);
-    dL.position.set(10,25,10);dL.castShadow=true;sc.add(dL);
-    sc.add(Object.assign(new THREE.PointLight(0x00FF88,1.2,60),{{position:new THREE.Vector3(-15,12,-10)}}));
-    sc.add(Object.assign(new THREE.PointLight(0xFF4466,1.0,60),{{position:new THREE.Vector3(15,12,12)}}));
-    sc.add(Object.assign(new THREE.PointLight(0xFFD700,0.4,40),{{position:new THREE.Vector3(0,18,0)}}));
+    dL.position.set(10,25,10);dL.castShadow=true;
+    dL.shadow.mapSize.set(1024,1024);sc.add(dL);
+    const pA=new THREE.PointLight(0x00FF88,1.5,60);pA.position.set(-15,12,-10);sc.add(pA);
+    const pB=new THREE.PointLight(0xFF4466,1.0,60);pB.position.set(15,12,12);sc.add(pB);
+    const pC=new THREE.PointLight(0xFFD700,0.6,40);pC.position.set(0,18,0);sc.add(pC);
+    sc.add(Object.assign(new THREE.PointLight(0x00D9FF,0.3,30),{{position:new THREE.Vector3(0,-2,0)}}));
 
-    // Floor
-    const fl=new THREE.Mesh(new THREE.PlaneGeometry(50,50),
-      new THREE.MeshPhongMaterial({{color:0x080c14,specular:0x111828,shininess:80,transparent:true,opacity:0.85}}));
-    fl.rotation.x=-Math.PI/2;fl.position.y=-H/2-0.1;fl.receiveShadow=true;sc.add(fl);
-    const gr=new THREE.GridHelper(40,40,0x0d1525,0x0a0f1c);
-    gr.position.y=-H/2;sc.add(gr);
+    /* ═══ Floor ═══ */
+    const flG=new THREE.PlaneGeometry(50,50);
+    const flM=new THREE.MeshPhongMaterial({{color:0x080c14,specular:0x111828,shininess:80,transparent:true,opacity:0.85}});
+    const fl=new THREE.Mesh(flG,flM);
+    fl.rotation.x=-Math.PI/2;fl.position.y=-0.1;fl.receiveShadow=true;sc.add(fl);
+    sc.add(new THREE.GridHelper(40,40,0x0d1525,0x0a0f1c));
 
-    // GEX color: green for positive, red for negative
+    /* ═══ Zero plane at y=H/2 (midpoint) ═══ */
+    const zpG=new THREE.PlaneGeometry(W+2,Dep+2);
+    const zp=new THREE.Mesh(zpG,new THREE.MeshBasicMaterial({{
+      color:0xffffff,transparent:true,opacity:0.03,side:THREE.DoubleSide,depthWrite:false}}));
+    zp.rotation.x=-Math.PI/2;zp.position.y=H/2;sc.add(zp);
+    const zpE=new THREE.LineSegments(new THREE.EdgesGeometry(zpG),
+      new THREE.LineBasicMaterial({{color:0xffffff,transparent:true,opacity:0.08}}));
+    zpE.rotation.x=-Math.PI/2;zpE.position.y=H/2;sc.add(zpE);
+
+    /* ═══ Color: green=positive GEX, red=negative ═══ */
     function gexCol(v){{
-      const t=v/gM; // -1 to 1
-      if(t>0){{const s=Math.min(t,1);return[0,0.3+s*0.7,0.2+s*0.3]}}
+      const t=v/gM;
+      if(t>=0){{const s=Math.min(t,1);return[0,0.3+s*0.7,0.2+s*0.3]}}
       else{{const s=Math.min(-t,1);return[0.4+s*0.6,0.1*(1-s),0.15*(1-s)]}}
     }}
 
-    // Build surface — Y=0 is the zero-GEX plane, positive goes up, negative goes down
+    /* ═══ Build surface — FLAT ARRAY indexed F[j*nS+i] ═══ */
+    /* y = (gex/gM)*(H/2) + H/2  so zero-GEX is at H/2, positive above, negative below */
     const vs=[],cs=[],ix=[];
     for(let j=0;j<nD;j++){{
       for(let i=0;i<nS;i++){{
         const x=-W/2+(i/(nS-1||1))*W;
         const z=-Dep/2+(j/(nD-1||1))*Dep;
-        const gex=lk[D.strikes[i]+','+D.dtes[j]]||0;
-        const y=(gex/gM)*(H/2); // centered at 0
+        const gex=F[j*nS+i]||0;
+        const y=(gex/gM)*(H/2)+H/2;
         vs.push(x,y,z);
         const[cr,cg,cb]=gexCol(gex);
         cs.push(cr,cg,cb);
@@ -2080,61 +2095,59 @@ def render_3d_gex_surface(data: pd.DataFrame, spot: float, strike_range: float, 
     for(let j=0;j<nD-1;j++)
       for(let i=0;i<nS-1;i++){{
         const a=j*nS+i,b=a+1,c=(j+1)*nS+i,d=c+1;
-        ix.push(a,b,d,a,d,c);
+        ix.push(a,b,d, a,d,c);
       }}
 
     const sG=new THREE.BufferGeometry();
     sG.setAttribute('position',new THREE.Float32BufferAttribute(vs,3));
     sG.setAttribute('color',new THREE.Float32BufferAttribute(cs,3));
-    sG.setIndex(ix);sG.computeVertexNormals();
+    sG.setIndex(ix);
+    sG.computeVertexNormals();
 
-    const surf=new THREE.Mesh(sG,new THREE.MeshPhongMaterial({{
-      vertexColors:true,side:THREE.DoubleSide,shininess:100,transparent:true,opacity:0.90,specular:0x334466}}));
-    surf.castShadow=true;sc.add(surf);
+    const sM=new THREE.MeshPhongMaterial({{
+      vertexColors:true,side:THREE.DoubleSide,
+      shininess:120,transparent:true,opacity:0.90,specular:0x334466}});
+    const surf=new THREE.Mesh(sG,sM);
+    surf.castShadow=true;surf.receiveShadow=true;sc.add(surf);
 
-    // Glow
-    sc.add(new THREE.Mesh(sG.clone(),new THREE.MeshBasicMaterial({{
-      vertexColors:true,transparent:true,opacity:0.04,side:THREE.BackSide,depthWrite:false}})));
+    /* Edge glow */
+    const glow=new THREE.Mesh(sG.clone(),new THREE.MeshBasicMaterial({{
+      vertexColors:true,transparent:true,opacity:0.05,side:THREE.BackSide,depthWrite:false}}));
+    glow.scale.set(1.01,1.05,1.01);sc.add(glow);
 
-    // Wire
+    /* Wireframe */
     const wire=new THREE.Mesh(sG.clone(),new THREE.MeshBasicMaterial({{
       color:0xffffff,wireframe:true,transparent:true,opacity:0.035}}));
     sc.add(wire);
 
-    // Zero plane (y=0)
-    const zpG=new THREE.PlaneGeometry(W+2,Dep+2);
-    const zp=new THREE.Mesh(zpG,new THREE.MeshBasicMaterial({{
-      color:0xffffff,transparent:true,opacity:0.02,side:THREE.DoubleSide,depthWrite:false}}));
-    zp.rotation.x=-Math.PI/2;zp.position.y=0;sc.add(zp);
-    const zpE=new THREE.LineSegments(new THREE.EdgesGeometry(zpG),
-      new THREE.LineBasicMaterial({{color:0xffffff,transparent:true,opacity:0.06}}));
-    zpE.rotation.x=-Math.PI/2;zpE.position.y=0;sc.add(zpE);
-
-    // Spot marker
+    /* ═══ Spot marker ═══ */
     const sI=D.strikes.reduce((b,s,i)=>Math.abs(s-D.spot)<Math.abs(D.strikes[b]-D.spot)?i:b,0);
     const sX=-W/2+(sI/(nS-1||1))*W;
+
+    /* ATM line on surface */
+    const ap=[];
+    for(let j=0;j<nD;j++){{
+      const gex=F[j*nS+sI]||0;
+      const y=(gex/gM)*(H/2)+H/2;
+      ap.push(new THREE.Vector3(sX,y+0.06,-Dep/2+(j/(nD-1||1))*Dep));
+    }}
+    sc.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(ap),
+      new THREE.LineBasicMaterial({{color:0xFFD700,transparent:true,opacity:0.75}})));
+
+    /* Diamond */
     const dia=new THREE.Mesh(new THREE.OctahedronGeometry(0.25),
       new THREE.MeshPhongMaterial({{color:0xFFD700,emissive:0xFFD700,emissiveIntensity:0.4,shininess:200}}));
-    dia.position.set(sX,H/2+1.5,0);sc.add(dia);
+    dia.position.set(sX,H+1.5,0);sc.add(dia);
     const dgl=new THREE.Mesh(new THREE.SphereGeometry(0.6,16,16),
       new THREE.MeshBasicMaterial({{color:0xFFD700,transparent:true,opacity:0.06}}));
     dgl.position.copy(dia.position);sc.add(dgl);
-    // Beam
-    sc.add(Object.assign(new THREE.Mesh(new THREE.CylinderGeometry(0.01,0.01,H+4,8),
-      new THREE.MeshBasicMaterial({{color:0xFFD700,transparent:true,opacity:0.06}})),
-      {{position:new THREE.Vector3(sX,0,0)}}));
 
-    // ATM line on surface
-    const ap=[];
-    for(let j=0;j<nD;j++){{
-      const gex=lk[D.strikes[sI]+','+D.dtes[j]]||0;
-      const y=(gex/gM)*(H/2);
-      ap.push(new THREE.Vector3(sX,y+0.05,-Dep/2+(j/(nD-1||1))*Dep));
-    }}
-    sc.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(ap),
-      new THREE.LineBasicMaterial({{color:0xFFD700,transparent:true,opacity:0.7}})));
+    /* Beam */
+    const bmG=new THREE.CylinderGeometry(0.01,0.01,H+4,8);
+    const bmM=new THREE.MeshBasicMaterial({{color:0xFFD700,transparent:true,opacity:0.06}});
+    const bm=new THREE.Mesh(bmG,bmM);bm.position.set(sX,(H+4)/2,0);sc.add(bm);
 
-    // ═══ Refs ═══
+    /* ═══ Labels ═══ */
     const refs=new THREE.Group();
     function mkT(text,color,sz){{
       const c=document.createElement('canvas');c.width=256;c.height=64;
@@ -2149,26 +2162,21 @@ def render_3d_gex_surface(data: pd.DataFrame, spot: float, strike_range: float, 
     D.stkLabels.forEach(s=>{{
       const x=-W/2+(s.i/(nS-1||1))*W;
       const lb=mkT('$'+s.v.toFixed(0),'#00D9FF',26);
-      lb.position.set(x,-H/2-0.8,Dep/2+1.2);refs.add(lb);
-    }});
+      lb.position.set(x,-0.8,Dep/2+1.2);refs.add(lb)}});
     D.dtLabels.forEach(d=>{{
       const z=-Dep/2+(d.i/(nD-1||1))*Dep;
       const lb=mkT(d.v+'d','#FE53BB',26);
-      lb.position.set(-W/2-1.6,-H/2-0.8,z);refs.add(lb);
-    }});
-    // Zero label
-    const zL=mkT('0 (zero GEX)','rgba(255,255,255,0.5)',22);
-    zL.position.set(-W/2-2.5,0,-Dep/2);refs.add(zL);
-    // Spot label
-    const spL=mkT('SPOT $'+D.spot.toFixed(1),'#FFD700',28);
-    spL.position.set(sX,H/2+2.8,0);refs.add(spL);
-    // Axis titles
-    refs.add(Object.assign(mkT('STRIKE →','#00D9FF',22),{{position:new THREE.Vector3(0,-H/2-0.8,Dep/2+2.5)}}));
-    refs.add(Object.assign(mkT('← DTE','#FE53BB',22),{{position:new THREE.Vector3(-W/2-1.6,-H/2-0.8,-Dep/2-1.2)}}));
-    refs.add(Object.assign(mkT('GEX $M ↑','#00FF88',22),{{position:new THREE.Vector3(-W/2-2.5,H/4,Dep/2)}}));
+      lb.position.set(-W/2-1.6,-0.8,z);refs.add(lb)}});
+    refs.add(Object.assign(mkT('0 (GEX=0)','rgba(255,255,255,0.5)',22),
+      {{position:new THREE.Vector3(-W/2-2.5,H/2,-Dep/2)}}));
+    refs.add(Object.assign(mkT('SPOT $'+D.spot.toFixed(1),'#FFD700',28),
+      {{position:new THREE.Vector3(sX,H+2.8,0)}}));
+    refs.add(Object.assign(mkT('STRIKE','#00D9FF',22),{{position:new THREE.Vector3(0,-0.8,Dep/2+2.5)}}));
+    refs.add(Object.assign(mkT('DTE','#FE53BB',22),{{position:new THREE.Vector3(-W/2-1.6,-0.8,-Dep/2-1.2)}}));
+    refs.add(Object.assign(mkT('GEX $M','#00FF88',22),{{position:new THREE.Vector3(-W/2-2.5,H*0.75,Dep/2)}}));
     sc.add(refs);
 
-    // Tooltip
+    /* ═══ Tooltip ═══ */
     const rc=new THREE.Raycaster(),mv=new THREE.Vector2(),tipE=document.getElementById('tip');
     R.domElement.addEventListener('mousemove',e=>{{
       mv.x=(e.clientX/innerWidth)*2-1;mv.y=-(e.clientY/innerHeight)*2+1;
@@ -2179,43 +2187,58 @@ def render_3d_gex_surface(data: pd.DataFrame, spot: float, strike_range: float, 
         const si=Math.round(((p.x+W/2)/W)*(nS-1));
         const di=Math.round(((p.z+Dep/2)/Dep)*(nD-1));
         if(si>=0&&si<nS&&di>=0&&di<nD){{
-          const gex=lk[D.strikes[si]+','+D.dtes[di]]||0;
+          const gex=F[di*nS+si]||0;
           const col=gex>=0?'#00FF88':'#FF4466';
           tipE.style.display='block';
           tipE.style.left=(e.clientX+16)+'px';tipE.style.top=(e.clientY-10)+'px';
-          tipE.innerHTML=`<div class="tip-v" style="color:${{col}}">${{gex>=0?'+':''}}${{gex.toFixed(2)}}M</div>
-            <b>Strike:</b> $${{D.strikes[si].toFixed(1)}}<br><b>DTE:</b> ${{D.dtes[di].toFixed(0)}}d`;
+          tipE.innerHTML='<div class="tip-v" style="color:'+col+'">'+(gex>=0?'+':'')+gex.toFixed(2)+'M</div>'+
+            '<b>Strike:</b> $'+D.strikes[si].toFixed(1)+'<br><b>DTE:</b> '+D.dtes[di].toFixed(0)+'d';
         }}
       }}else tipE.style.display='none';
     }});
 
-    // Camera
+    /* ═══ Camera — identical to IV surface ═══ */
     const cv=R.domElement;
     cv.addEventListener('mousedown',e=>{{md=true;lx=e.clientX;ly=e.clientY}});
-    cv.addEventListener('mousemove',e=>{{if(!md)return;th-=(e.clientX-lx)*0.005;
-      ph=Math.max(0.1,Math.min(1.45,ph+(e.clientY-ly)*0.005));lx=e.clientX;ly=e.clientY}});
-    cv.addEventListener('mouseup',()=>md=false);cv.addEventListener('mouseleave',()=>md=false);
+    cv.addEventListener('mousemove',e=>{{if(!md)return;
+      th-=(e.clientX-lx)*0.005;
+      ph=Math.max(0.1,Math.min(1.45,ph+(e.clientY-ly)*0.005));
+      lx=e.clientX;ly=e.clientY}});
+    cv.addEventListener('mouseup',()=>md=false);
+    cv.addEventListener('mouseleave',()=>md=false);
     cv.addEventListener('wheel',e=>{{rad=Math.max(10,Math.min(50,rad+e.deltaY*0.015))}});
     cv.addEventListener('touchstart',e=>{{if(e.touches.length===1){{md=true;lx=e.touches[0].clientX;ly=e.touches[0].clientY}}}});
     cv.addEventListener('touchmove',e=>{{if(!md||e.touches.length!==1)return;
-      th-=(e.touches[0].clientX-lx)*0.005;ph=Math.max(0.1,Math.min(1.45,ph+(e.touches[0].clientY-ly)*0.005));
+      th-=(e.touches[0].clientX-lx)*0.005;
+      ph=Math.max(0.1,Math.min(1.45,ph+(e.touches[0].clientY-ly)*0.005));
       lx=e.touches[0].clientX;ly=e.touches[0].clientY}});
     cv.addEventListener('touchend',()=>md=false);
 
+    /* ═══ Animate — identical to IV surface ═══ */
     let t=0;
     function anim(){{
-      requestAnimationFrame(anim);t+=0.006;
+      requestAnimationFrame(anim);
+      t+=0.006;
       if(autoRot)th+=0.001;
       cam.position.set(rad*Math.sin(ph)*Math.cos(th),Math.max(2,rad*Math.cos(ph)),rad*Math.sin(ph)*Math.sin(th));
-      cam.lookAt(0,0,0);
-      dia.position.y=H/2+1.5+Math.sin(t*2.5)*0.12;dia.rotation.y=t*1.5;
-      dgl.position.y=dia.position.y;dgl.scale.setScalar(1+Math.sin(t*3)*0.15);
+      cam.lookAt(0,H*0.35,0);
+      dia.position.y=H+1.5+Math.sin(t*2.5)*0.12;
+      dia.rotation.y=t*1.5;
+      dgl.position.y=dia.position.y;
+      dgl.scale.setScalar(1+Math.sin(t*3)*0.15);
+      pA.position.x=-15+Math.sin(t*0.4)*4;
+      pB.position.z=12+Math.cos(t*0.3)*4;
+      pC.intensity=0.6+Math.sin(t*0.8)*0.1;
       R.render(sc,cam)}}
     anim();
-    addEventListener('resize',()=>{{cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix();R.setSize(innerWidth,innerHeight)}});
-    </script></body></html>"""
-    components.html(html, height=650, scrolling=False)
 
+    addEventListener('resize',()=>{{
+      cam.aspect=innerWidth/innerHeight;
+      cam.updateProjectionMatrix();
+      R.setSize(innerWidth,innerHeight)}});
+    </script></body></html>"""
+
+    components.html(html, height=650, scrolling=False)
 
 
 
